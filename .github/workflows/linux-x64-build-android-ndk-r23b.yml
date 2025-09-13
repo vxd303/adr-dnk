@@ -14,7 +14,7 @@ jobs:
       AMICE_DIR: ${{ github.workspace }}/amice
       OUT_DIR: ${{ github.workspace }}/out
       CLANG_DIR: ${{ github.workspace }}/clang-r416183c1
-      # Unstripped clang r416183c1 (LLVM 12) để cung cấp libLLVM-12*.so
+      # Unstripped clang r416183c1 (LLVM 12)
       CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/c3260b409f13d92f8c9f4795420238694c529352/clang-r416183c1.tar.gz
 
     steps:
@@ -43,13 +43,15 @@ jobs:
             ${{ runner.os }}-cargo-amice-
 
       - name: Prepare folders
+        shell: bash
         run: |
-          set -eux
+          set -euo pipefail
           mkdir -p "$OUT_DIR" "$CLANG_DIR"
 
       - name: Download unstripped Clang r416183c1 (LLVM 12)
+        shell: bash
         run: |
-          set -eux
+          set -euo pipefail
           curl -fL "$CLANG_UNSTRIPPED_URL" -o /tmp/clang-r416183c1.tar.gz
           tar -xzf /tmp/clang-r416183c1.tar.gz -C "$CLANG_DIR"
           "$CLANG_DIR/bin/clang++" --version || true
@@ -57,8 +59,9 @@ jobs:
           ls -l "$CLANG_DIR/lib64"|| true
 
       - name: Normalize LLVM dylib name (handle libLLVM-12git.so)
+        shell: bash
         run: |
-          set -eux
+          set -euo pipefail
           FOUND="$(find "$CLANG_DIR" -maxdepth 3 -type f -name 'libLLVM-12*.so' | head -n1 || true)"
           if [ -z "$FOUND" ]; then
             echo "libLLVM-12*.so not found under $CLANG_DIR"
@@ -71,15 +74,14 @@ jobs:
           ln -sf "$BASENAME" "$LIBDIR/libLLVM.so"
           ls -l "$LIBDIR"/libLLVM*.so
 
-          # Env cho llvm-sys & linker
           {
             echo "LLVM_SYS_120_PREFIX=$CLANG_DIR"
-            echo "LD_LIBRARY_PATH=$LIBDIR:${LD_LIBRARY_PATH:-}"
-            echo "LIBRARY_PATH=$LIBDIR:${LIBRARY_PATH:-}"
+            echo "LD_LIBRARY_PATH=$LIBDIR"
+            echo "LIBRARY_PATH=$LIBDIR"
             echo "PATH=$CLANG_DIR/bin:${PATH}"
             echo "CC=$CLANG_DIR/bin/clang"
             echo "CXX=$CLANG_DIR/bin/clang++"
-            # Quan trọng: tắt RTTI/exceptions để khớp libLLVM prebuilts
+            # Match libLLVM prebuilts (disable RTTI/exception) + define version
             echo "CXXFLAGS=-fno-rtti -fno-exceptions -std=c++17 -DLLVM_VERSION_MAJOR=12"
           } >> "$GITHUB_ENV"
 
@@ -87,9 +89,10 @@ jobs:
             echo "LLVM_CONFIG_PATH=$CLANG_DIR/bin/llvm-config" >> "$GITHUB_ENV"
           fi
 
-      - name: Use clang + ld.lld as Rust linker (avoid ld.bfd issues)
+      - name: Use clang + ld.lld as Rust linker
+        shell: bash
         run: |
-          set -eux
+          set -euo pipefail
           {
             echo "RUSTFLAGS=-C linker=$CLANG_DIR/bin/clang -C link-arg=-fuse-ld=lld"
             echo "CARGO_TARGET_DIR=${{ env.AMICE_DIR }}/target-llvm12"
@@ -97,9 +100,10 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Patch for LLVM 12 (guard NoProfile enum)
+        shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
-          set -eux
+          set -euo pipefail
           f="amice-llvm/cpp/ffi.cc"
           if [ -f "$f" ]; then
             tmp="${f}.tmp"
@@ -116,23 +120,43 @@ jobs:
             grep -n "NoProfile" "$f" || true
           fi
 
-      - name: Build libamice.so (feature llvm12-0)
+      # Safe stub for LLVM<13
+      - name: Patch for LLVM 12 (stub LLVMIsTypeAttribute for LLVM<13)
+        shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
-          set -eux
+          set -euo pipefail
+          f="amice-llvm/cpp/ffi.cc"
+          echo '' >> "$f"
+          echo '#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR < 13' >> "$f"
+          echo 'extern "C" {' >> "$f"
+          echo '  /* Forward typedefs (no llvm-c headers needed) */' >> "$f"
+          echo '  typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;' >> "$f"
+          echo '  typedef int LLVMBool;' >> "$f"
+          echo '  LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef /*A*/) {' >> "$f"
+          echo '    /* LLVM 12 is missing this symbol in C API; return 0 to avoid unresolved symbols. */' >> "$f"
+          echo '    return 0;' >> "$f"
+          echo '  }' >> "$f"
+          echo '}' >> "$f"
+          echo '#endif' >> "$f"
+
+      - name: Build libamice.so (feature llvm12-0)
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
           cargo clean
           cargo build --release --no-default-features --features llvm12-0
           mkdir -p "$OUT_DIR"
           cp -v target-llvm12/release/libamice.so "$OUT_DIR/"
 
-      - name: Smoke test:load plugin with this clang
+      - name: Smoke test:show deps and compile a tiny TU
+        shell: bash
         run: |
-          set -eux
-          echo 'int main(){return 0;}' > /tmp/t.c
-          # clang 12 có thể không hỗ trợ -fpass-plugin, nhưng test load qua linker vẫn cần libLLVM*.so khả dụng
-          "$CLANG_DIR/bin/clang" -O2 -xc /tmp/t.c -o /tmp/t
-          # In ra thông tin lib để bạn so khớp khi dùng thực tế
+          set -euo pipefail
           ldd "$OUT_DIR/libamice.so" || true
+          echo 'int main(){return 0;}' > /tmp/t.c
+          "$CLANG_DIR/bin/clang" -O2 -xc /tmp/t.c -o /tmp/t
 
       - name: Upload artifact (libamice.so for clang-r416183c1)
         uses: actions/upload-artifact@v4
@@ -140,3 +164,4 @@ jobs:
           name: libamice-ndk-r23b-clang-r416183c1
           path: ${{ env.OUT_DIR }}/libamice.so
           if-no-files-found: error
+
