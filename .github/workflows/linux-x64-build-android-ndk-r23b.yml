@@ -14,6 +14,7 @@ jobs:
       AMICE_DIR: ${{ github.workspace }}/amice
       OUT_DIR: ${{ github.workspace }}/out
       CLANG_DIR: ${{ github.workspace }}/clang-r416183c1
+      # Unstripped clang r416183c1 (LLVM 12)
       CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/c3260b409f13d92f8c9f4795420238694c529352/clang-r416183c1.tar.gz
 
     steps:
@@ -118,7 +119,7 @@ jobs:
             grep -n "NoProfile" "$f" || true
           fi
 
-      # STUB an toàn cho LLVM<13, dùng echo để tránh lỗi YAML
+      # STUB LLVMIsTypeAttribute cho LLVM<13 (echo từng dòng để tránh YAML issues)
       - name: Patch for LLVM 12 (stub LLVMIsTypeAttribute for LLVM<13)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
@@ -131,38 +132,64 @@ jobs:
             echo '  typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;'
             echo '  typedef int LLVMBool;'
             echo '  LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef /*A*/) {'
-            echo '    return 0; // LLVM 12 không có symbol này trong C API'
+            echo '    return 0;'
             echo '  }'
             echo '}'
             echo '#endif'
           } >> "$f"
 
-      # Patch tránh gọi overload mới của createCFGSimplificationPass (LLVM12 không có)
-      - name: Patch for LLVM 12 (createCFGSimplificationPass overload)
+      # SHIM symbol createCFGSimplificationPass(SimplifyCFGOptions, std::function<...>)
+      - name: Add LLVM12 shim for createCFGSimplificationPass overload
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
-          mapfile -t files < <(find . -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name '*.hpp' \) -print0 | xargs -0 grep -Il 'createCFGSimplificationPass(' || true)
-          if [ "${#files[@]}" -gt 0 ]; then
-            for f in "${files[@]}"; do
-              echo "Patching SimplifyCFG in $f"
+          mkdir -p amice-llvm/cpp
+          shim="amice-llvm/cpp/llvm12_shim_simplifycfg.cc"
+          : > "$shim"
+          {
+            echo '#include <functional>'
+            echo '#include "llvm/IR/LegacyPassManager.h"'
+            echo '#include "llvm/Transforms/Scalar.h"'
+            echo 'namespace llvm {'
+            echo '  struct SimplifyCFGOptions;'
+            echo '  class Function;'
+            echo '  // factory cũ có sẵn trong LLVM 12:'
+            echo '  FunctionPass *createCFGSimplificationPass();'
+            echo '  // overload mới thiếu trong LLVM 12: tự cung cấp và forward'
+            echo '  FunctionPass *createCFGSimplificationPass(SimplifyCFGOptions /*Opts*/, std::function<bool(Function const&)> /*Predicate*/) {'
+            echo '    return createCFGSimplificationPass();'
+            echo '  }'
+            echo '}'
+          } >> "$shim"
+          echo "Created shim: $shim"
+          sed -n '1,120p' "$shim" || true
+
+      # Đảm bảo build.rs compile luôn file shim (nhiều dự án chỉ add ffi.cc)
+      - name: Patch build.rs to compile shim file
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          br="amice-llvm/build.rs"
+          if [ -f "$br" ]; then
+            # nếu đã có, không chèn trùng
+            if ! grep -q 'llvm12_shim_simplifycfg.cc' "$br"; then
+              # chèn thêm 1 dòng .file("cpp/llvm12_shim_simplifycfg.cc")
               awk '
-                BEGIN{patched=0}
-                /createCFGSimplificationPass\(/ && patched==0 {
-                  print "#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR >= 13"
-                  print $0
-                  print "#else"
-                  print "  PM.add(llvm::createCFGSimplificationPass());"
-                  print "#endif"
-                  patched=1
+                /cpp\/ffi\.cc/ && !added {
+                  print "        .file(\"cpp/ffi.cc\")"
+                  print "        .file(\"cpp/llvm12_shim_simplifycfg.cc\")"
+                  added=1
                   next
                 }
                 { print }
-              ' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
-            done
+              ' "$br" > "${br}.tmp" && mv "${br}.tmp" "$br"
+            fi
+            echo "build.rs patched:"
+            grep -n 'file("cpp' "$br" || true
           else
-            echo "No createCFGSimplificationPass() occurrences found; skipping."
+            echo "WARN: $br not found; build may already glob cpp/*.cc"
           fi
 
       - name: Build libamice.so (feature llvm12-0)
