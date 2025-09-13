@@ -11,11 +11,10 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      # Thư mục làm việc
       AMICE_DIR: ${{ github.workspace }}/amice
       OUT_DIR: ${{ github.workspace }}/out
 
-      # Unstripped Clang (LLVM 12) bạn chỉ định: r416183b1
+      # Unstripped Clang (LLVM 12) bạn yêu cầu
       CLANG_DIR: ${{ github.workspace }}/clang-r416183b1
       CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/219e6aaa8fecc0ab0df4e691a9645ba778267af2/clang-r416183b1.tar.gz
 
@@ -58,11 +57,23 @@ jobs:
           ls -l "$CLANG_DIR/lib"  || true
           ls -l "$CLANG_DIR/lib64"|| true
 
-      - name: Configure env for llvm-sys 12 (NDK r23 family)
+      - name: Configure env for llvm-sys 12 + use this clang++
         run: |
           set -eux
           echo "LLVM_SYS_120_PREFIX=$CLANG_DIR" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=$CLANG_DIR/lib:$CLANG_DIR/lib64:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+          # Ép cc-rs dùng clang++ này và truyền macro version
+          echo "CXX=$CLANG_DIR/bin/clang++" >> $GITHUB_ENV
+          echo "CXXFLAGS=-DLLVM_VERSION_MAJOR=12" >> $GITHUB_ENV
+
+      - name: Patch for LLVM 12 (NoProfile not available)
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -eux
+          # Guard dòng ENUM_CASE(... NoProfile ...) cho LLVM >= 14
+          sed -i 's/^\(\s*\)ENUM_CASE(llvm::Attribute::NoProfile, NoProfile)/\1#if defined(LLVM_VERSION_MAJOR) \&\& LLVM_VERSION_MAJOR \>= 14\
+\1ENUM_CASE(llvm::Attribute::NoProfile, NoProfile)\
+\1#endif/' amice-llvm/cpp/ffi.cc
 
       - name: Build libamice.so (feature LLVM 12.0)
         working-directory: ${{ env.AMICE_DIR }}
@@ -71,7 +82,7 @@ jobs:
           cargo build --release --no-default-features --features llvm12-0
           cp -v target/release/libamice.so "$OUT_DIR/"
 
-      - name: Smoke test:load plugin with this clang
+      - name: Smoke test: load plugin with this clang
         run: |
           set -eux
           echo 'int main(){return 0;}' > /tmp/t.c
