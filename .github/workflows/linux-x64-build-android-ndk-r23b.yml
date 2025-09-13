@@ -14,7 +14,6 @@ jobs:
       AMICE_DIR: ${{ github.workspace }}/amice
       OUT_DIR: ${{ github.workspace }}/out
       CLANG_DIR: ${{ github.workspace }}/clang-r416183c1
-      # Unstripped clang r416183c1 (LLVM 12)
       CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/c3260b409f13d92f8c9f4795420238694c529352/clang-r416183c1.tar.gz
 
     steps:
@@ -81,7 +80,6 @@ jobs:
             echo "PATH=$CLANG_DIR/bin:${PATH}"
             echo "CC=$CLANG_DIR/bin/clang"
             echo "CXX=$CLANG_DIR/bin/clang++"
-            # Match libLLVM prebuilts (disable RTTI/exception) + define version
             echo "CXXFLAGS=-fno-rtti -fno-exceptions -std=c++17 -DLLVM_VERSION_MAJOR=12"
           } >> "$GITHUB_ENV"
 
@@ -120,25 +118,52 @@ jobs:
             grep -n "NoProfile" "$f" || true
           fi
 
-      # Safe stub for LLVM<13
+      # STUB an toàn cho LLVM<13, dùng echo để tránh lỗi YAML
       - name: Patch for LLVM 12 (stub LLVMIsTypeAttribute for LLVM<13)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
           f="amice-llvm/cpp/ffi.cc"
-          echo '' >> "$f"
-          echo '#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR < 13' >> "$f"
-          echo 'extern "C" {' >> "$f"
-          echo '  /* Forward typedefs (no llvm-c headers needed) */' >> "$f"
-          echo '  typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;' >> "$f"
-          echo '  typedef int LLVMBool;' >> "$f"
-          echo '  LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef /*A*/) {' >> "$f"
-          echo '    /* LLVM 12 is missing this symbol in C API; return 0 to avoid unresolved symbols. */' >> "$f"
-          echo '    return 0;' >> "$f"
-          echo '  }' >> "$f"
-          echo '}' >> "$f"
-          echo '#endif' >> "$f"
+          {
+            echo '#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR < 13'
+            echo 'extern "C" {'
+            echo '  typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;'
+            echo '  typedef int LLVMBool;'
+            echo '  LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef /*A*/) {'
+            echo '    return 0; // LLVM 12 không có symbol này trong C API'
+            echo '  }'
+            echo '}'
+            echo '#endif'
+          } >> "$f"
+
+      # Patch tránh gọi overload mới của createCFGSimplificationPass (LLVM12 không có)
+      - name: Patch for LLVM 12 (createCFGSimplificationPass overload)
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find . -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name '*.hpp' \) -print0 | xargs -0 grep -Il 'createCFGSimplificationPass(' || true)
+          if [ "${#files[@]}" -gt 0 ]; then
+            for f in "${files[@]}"; do
+              echo "Patching SimplifyCFG in $f"
+              awk '
+                BEGIN{patched=0}
+                /createCFGSimplificationPass\(/ && patched==0 {
+                  print "#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR >= 13"
+                  print $0
+                  print "#else"
+                  print "  PM.add(llvm::createCFGSimplificationPass());"
+                  print "#endif"
+                  patched=1
+                  next
+                }
+                { print }
+              ' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+            done
+          else
+            echo "No createCFGSimplificationPass() occurrences found; skipping."
+          fi
 
       - name: Build libamice.so (feature llvm12-0)
         shell: bash
@@ -150,13 +175,13 @@ jobs:
           mkdir -p "$OUT_DIR"
           cp -v target-llvm12/release/libamice.so "$OUT_DIR/"
 
-      - name: Smoke test:show deps and compile a tiny TU
+      - name: Smoke test:load plugin with this clang
         shell: bash
         run: |
           set -euo pipefail
-          ldd "$OUT_DIR/libamice.so" || true
+          export LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
           echo 'int main(){return 0;}' > /tmp/t.c
-          "$CLANG_DIR/bin/clang" -O2 -xc /tmp/t.c -o /tmp/t
+          "$CLANG_DIR/bin/clang" -fpass-plugin="$OUT_DIR/libamice.so" -O2 -xc /tmp/t.c -o /tmp/t
 
       - name: Upload artifact (libamice.so for clang-r416183c1)
         uses: actions/upload-artifact@v4
@@ -164,4 +189,3 @@ jobs:
           name: libamice-ndk-r23b-clang-r416183c1
           path: ${{ env.OUT_DIR }}/libamice.so
           if-no-files-found: error
-
