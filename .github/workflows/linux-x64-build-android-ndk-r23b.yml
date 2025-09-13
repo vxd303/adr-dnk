@@ -3,7 +3,6 @@ name: linux-x64-build-android-ndk-r23b (libamice.so)
 on:
   push:
     branches: [ main, master ]
-    tags: [ "v*", "release-*", "amice-*" ]
   pull_request:
   workflow_dispatch:
 
@@ -12,41 +11,48 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      CARGO_TERM_COLOR: always
+      AMICE_DIR: ${{ github.workspace }}/amice
       OUT_DIR: ${{ github.workspace }}/out
       CLANG_DIR: ${{ github.workspace }}/clang-r416183c1
       # Unstripped Clang matching NDK r23b (LLVM 12)
-      CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/219e6aaa8fecc0ab0df4e691a9645ba778267af2/clang-r416183b1.tar.gz
+      CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r416183c1.tar.gz
 
     steps:
-      - name: Checkout
+      - name: Checkout (your repo)
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: Checkout amice source
+        uses: actions/checkout@v4
+        with:
+          repository: fuqiuluo/amice
+          ref: master
+          path: amice
+
+      - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
+      - name: Cache cargo (amice)
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+            ${{ env.AMICE_DIR }}/target
+          key: ${{ runner.os }}-cargo-amice-${{ hashFiles('amice/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-amice-
 
       - name: Prepare folders
         run: |
           set -eux
           mkdir -p "$OUT_DIR" "$CLANG_DIR"
 
-      - name: Download unstripped Clang r416183c1 (LLVM 12)
+      - name: Download unstripped Clang r416183c1 (LLVM 12, NDK r23b)
         run: |
           set -eux
           curl -fL "$CLANG_UNSTRIPPED_URL" -o /tmp/clang-r416183c1.tar.gz
           tar -xzf /tmp/clang-r416183c1.tar.gz -C "$CLANG_DIR"
           "$CLANG_DIR/bin/clang++" --version || true
-          # Thư viện có thể ở lib hoặc lib64
           ls -l "$CLANG_DIR/lib"  || true
           ls -l "$CLANG_DIR/lib64"|| true
 
@@ -56,10 +62,11 @@ jobs:
           echo "LLVM_SYS_120_PREFIX=$CLANG_DIR" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=$CLANG_DIR/lib:$CLANG_DIR/lib64:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
 
-      - name: Build libamice.so (LLVM 12)
+      - name: Build libamice.so (feature LLVM 12)
+        working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -eux
-          # Amice dùng llvm-sys; thử feature phổ biến cho LLVM 12.
+          # Thử 2 biến thể feature tên thường gặp cho LLVM 12
           if cargo build --release --no-default-features --features llvm-12; then
             echo "Built with --features llvm-12"
           else
