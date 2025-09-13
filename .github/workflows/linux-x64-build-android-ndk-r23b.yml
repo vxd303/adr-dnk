@@ -15,8 +15,7 @@ jobs:
       OUT_DIR: ${{ github.workspace }}/out
       CLANG_DIR: ${{ github.workspace }}/clang-r416183c1
       # Unstripped Clang matching NDK r23b (LLVM 12)
-      CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r416183c1.tar.gz
-
+CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/219e6aaa8fecc0ab0df4e691a9645ba778267af2/clang-r416183b1.tar.gz
     steps:
       - name: Checkout (your repo)
         uses: actions/checkout@v4
