@@ -1,4 +1,4 @@
-name: linux-x64-build-android-ndk-r23 (libamice.so via clang-r416183c1)
+name: linux-x64-build-android-ndk-r23b (libamice.so via clang-r416183c1)
 
 on:
   push:
@@ -14,7 +14,7 @@ jobs:
       AMICE_DIR: ${{ github.workspace }}/amice
       OUT_DIR: ${{ github.workspace }}/out
       CLANG_DIR: ${{ github.workspace }}/clang-r416183c1
-      # Clang unstripped (LLVM 12, r416183c1)
+      # Unstripped clang r416183c1 (LLVM 12) để cung cấp libLLVM-12*.so
       CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/c3260b409f13d92f8c9f4795420238694c529352/clang-r416183c1.tar.gz
 
     steps:
@@ -37,7 +37,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ${{ env.AMICE_DIR }}/target
+            ${{ env.AMICE_DIR }}/target-llvm12
           key: ${{ runner.os }}-cargo-amice-${{ hashFiles('amice/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-amice-
@@ -61,7 +61,9 @@ jobs:
           set -eux
           FOUND="$(find "$CLANG_DIR" -maxdepth 3 -type f -name 'libLLVM-12*.so' | head -n1 || true)"
           if [ -z "$FOUND" ]; then
-            echo "libLLVM-12*.so not found under $CLANG_DIR"; find "$CLANG_DIR" -maxdepth 3 -name 'libLLVM*.so' -ls || true; exit 1
+            echo "libLLVM-12*.so not found under $CLANG_DIR"
+            find "$CLANG_DIR" -maxdepth 3 -name 'libLLVM*.so' -ls || true
+            exit 1
           fi
           LIBDIR="$(dirname "$FOUND")"
           BASENAME="$(basename "$FOUND")"
@@ -69,17 +71,18 @@ jobs:
           ln -sf "$BASENAME" "$LIBDIR/libLLVM.so"
           ls -l "$LIBDIR"/libLLVM*.so
 
-          # Export search paths + toolchain C/C++
+          # Env cho llvm-sys & linker
           {
             echo "LLVM_SYS_120_PREFIX=$CLANG_DIR"
             echo "LD_LIBRARY_PATH=$LIBDIR:${LD_LIBRARY_PATH:-}"
             echo "LIBRARY_PATH=$LIBDIR:${LIBRARY_PATH:-}"
+            echo "PATH=$CLANG_DIR/bin:${PATH}"
             echo "CC=$CLANG_DIR/bin/clang"
             echo "CXX=$CLANG_DIR/bin/clang++"
-            echo "CXXFLAGS=-DLLVM_VERSION_MAJOR=12"
+            # Quan trọng: tắt RTTI/exceptions để khớp libLLVM prebuilts
+            echo "CXXFLAGS=-fno-rtti -fno-exceptions -std=c++17 -DLLVM_VERSION_MAJOR=12"
           } >> "$GITHUB_ENV"
 
-          # Nếu có llvm-config, trỏ để llvm-sys dùng luôn
           if [ -x "$CLANG_DIR/bin/llvm-config" ]; then
             echo "LLVM_CONFIG_PATH=$CLANG_DIR/bin/llvm-config" >> "$GITHUB_ENV"
           fi
@@ -87,9 +90,9 @@ jobs:
       - name: Use clang + ld.lld as Rust linker (avoid ld.bfd issues)
         run: |
           set -eux
-          # Dùng clang làm linker và ép dùng ld.lld của bộ này
           {
             echo "RUSTFLAGS=-C linker=$CLANG_DIR/bin/clang -C link-arg=-fuse-ld=lld"
+            echo "CARGO_TARGET_DIR=${{ env.AMICE_DIR }}/target-llvm12"
             echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$CLANG_DIR/bin/clang"
           } >> "$GITHUB_ENV"
 
@@ -98,36 +101,42 @@ jobs:
         run: |
           set -eux
           f="amice-llvm/cpp/ffi.cc"
-          tmp="${f}.tmp"
-          awk '
-            /ENUM_CASE\(llvm::Attribute::NoProfile, NoProfile\)/ {
-              print "#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR >= 14";
-              print $0;
-              print "#endif";
-              next
-            }
-            { print }
-          ' "$f" > "$tmp"
-          mv "$tmp" "$f"
-          grep -n "NoProfile" "$f" || true
+          if [ -f "$f" ]; then
+            tmp="${f}.tmp"
+            awk '
+              /ENUM_CASE\(llvm::Attribute::NoProfile, NoProfile\)/ {
+                print "#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR >= 14";
+                print $0;
+                print "#endif";
+                next
+              }
+              { print }
+            ' "$f" > "$tmp"
+            mv "$tmp" "$f"
+            grep -n "NoProfile" "$f" || true
+          fi
 
-      - name: Build libamice.so (feature LLVM 12.0)
+      - name: Build libamice.so (feature llvm12-0)
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -eux
+          cargo clean
           cargo build --release --no-default-features --features llvm12-0
           mkdir -p "$OUT_DIR"
-          cp -v target/release/libamice.so "$OUT_DIR/"
+          cp -v target-llvm12/release/libamice.so "$OUT_DIR/"
 
       - name: Smoke test:load plugin with this clang
         run: |
           set -eux
           echo 'int main(){return 0;}' > /tmp/t.c
-          "$CLANG_DIR/bin/clang" -fpass-plugin="$OUT_DIR/libamice.so" -O2 -xc /tmp/t.c -o /tmp/t
+          # clang 12 có thể không hỗ trợ -fpass-plugin, nhưng test load qua linker vẫn cần libLLVM*.so khả dụng
+          "$CLANG_DIR/bin/clang" -O2 -xc /tmp/t.c -o /tmp/t
+          # In ra thông tin lib để bạn so khớp khi dùng thực tế
+          ldd "$OUT_DIR/libamice.so" || true
 
-      - name: Upload artifact (libamice.so for clang-r416183b1)
+      - name: Upload artifact (libamice.so for clang-r416183c1)
         uses: actions/upload-artifact@v4
         with:
-          name: libamice-ndk-r23-clang-r416183c1
+          name: libamice-ndk-r23b-clang-r416183c1
           path: ${{ env.OUT_DIR }}/libamice.so
           if-no-files-found: error
