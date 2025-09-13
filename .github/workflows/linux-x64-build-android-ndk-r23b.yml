@@ -1,4 +1,4 @@
-name: linux-x64-build-android-ndk-r23b (libamice.so)
+name: linux-x64-build-android-ndk-r23 (libamice.so via clang-r416183b1)
 
 on:
   push:
@@ -11,14 +11,16 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
+      # Thư mục làm việc
       AMICE_DIR: ${{ github.workspace }}/amice
       OUT_DIR: ${{ github.workspace }}/out
-      CLANG_DIR: ${{ github.workspace }}/clang-r416183c1
-      # Unstripped Clang matching NDK r23b (LLVM 12)
+
+      # Unstripped Clang (LLVM 12) bạn chỉ định: r416183b1
+      CLANG_DIR: ${{ github.workspace }}/clang-r416183b1
       CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/219e6aaa8fecc0ab0df4e691a9645ba778267af2/clang-r416183b1.tar.gz
-    
+
     steps:
-      - name: Checkout (your repo)
+      - name: Checkout (this repo)
         uses: actions/checkout@v4
 
       - name: Checkout amice source
@@ -47,32 +49,26 @@ jobs:
           set -eux
           mkdir -p "$OUT_DIR" "$CLANG_DIR"
 
-      - name: Download unstripped Clang r416183c1 (LLVM 12, NDK r23b)
+      - name: Download unstripped Clang r416183b1 (LLVM 12)
         run: |
           set -eux
-          curl -fL "$CLANG_UNSTRIPPED_URL" -o /tmp/clang-r416183c1.tar.gz
-          tar -xzf /tmp/clang-r416183c1.tar.gz -C "$CLANG_DIR"
+          curl -fL "$CLANG_UNSTRIPPED_URL" -o /tmp/clang-r416183b1.tar.gz
+          tar -xzf /tmp/clang-r416183b1.tar.gz -C "$CLANG_DIR"
           "$CLANG_DIR/bin/clang++" --version || true
           ls -l "$CLANG_DIR/lib"  || true
           ls -l "$CLANG_DIR/lib64"|| true
 
-      - name: Configure env for llvm-sys 12 (NDK r23b)
+      - name: Configure env for llvm-sys 12 (NDK r23 family)
         run: |
           set -eux
           echo "LLVM_SYS_120_PREFIX=$CLANG_DIR" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=$CLANG_DIR/lib:$CLANG_DIR/lib64:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
 
-      - name: Build libamice.so (feature LLVM 12)
+      - name: Build libamice.so (feature LLVM 12.0)
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -eux
-          # Thử 2 biến thể feature tên thường gặp cho LLVM 12
-          if cargo build --release --no-default-features --features llvm-12; then
-            echo "Built with --features llvm-12"
-          else
-            echo "Retry with --features llvm-12-0"
-            cargo build --release --no-default-features --features llvm-12-0
-          fi
+          cargo build --release --no-default-features --features llvm12-0
           cp -v target/release/libamice.so "$OUT_DIR/"
 
       - name: Smoke test:load plugin with this clang
@@ -81,9 +77,9 @@ jobs:
           echo 'int main(){return 0;}' > /tmp/t.c
           "$CLANG_DIR/bin/clang" -fpass-plugin="$OUT_DIR/libamice.so" -O2 -xc /tmp/t.c -o /tmp/t
 
-      - name: Upload artifact (libamice.so for NDK r23b)
+      - name: Upload artifact (libamice.so for clang-r416183b1)
         uses: actions/upload-artifact@v4
         with:
-          name: libamice-ndk-r23b
+          name: libamice-ndk-r23-clang-r416183b1
           path: ${{ env.OUT_DIR }}/libamice.so
           if-no-files-found: error
