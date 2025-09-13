@@ -14,7 +14,7 @@ jobs:
       AMICE_DIR: ${{ github.workspace }}/amice
       OUT_DIR: ${{ github.workspace }}/out
       CLANG_DIR: ${{ github.workspace }}/clang-r416183b1
-      # Clang unstripped bạn yêu cầu (LLVM 12, r416183b1)
+      # Clang unstripped (LLVM 12, r416183b1) theo yêu cầu
       CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/219e6aaa8fecc0ab0df4e691a9645ba778267af2/clang-r416183b1.tar.gz
 
     steps:
@@ -56,22 +56,23 @@ jobs:
           ls -l "$CLANG_DIR/lib"  || true
           ls -l "$CLANG_DIR/lib64"|| true
 
-      - name: Normalize LLVM dylib name (create libLLVM.so → libLLVM-12.so)
+      - name: Normalize LLVM dylib name (handle libLLVM-12git.so)
         run: |
           set -eux
-          LIBDIR=""
-          if [ -f "$CLANG_DIR/lib/libLLVM-12.so" ]; then
-            LIBDIR="$CLANG_DIR/lib"
-          elif [ -f "$CLANG_DIR/lib64/libLLVM-12.so" ]; then
-            LIBDIR="$CLANG_DIR/lib64"
-          else
-            echo "libLLVM-12.so not found under $CLANG_DIR/{lib,lib64}"; exit 1
+          FOUND="$(find "$CLANG_DIR" -maxdepth 3 -type f -name 'libLLVM-12*.so' | head -n1 || true)"
+          if [ -z "$FOUND" ]; then
+            echo "libLLVM-12*.so not found under $CLANG_DIR; listing candidates:" >&2
+            find "$CLANG_DIR" -maxdepth 3 -type f -name 'libLLVM*.so' -ls || true
+            exit 1
           fi
-          ln -sf "$LIBDIR/libLLVM-12.so" "$LIBDIR/libLLVM.so"
-          echo "Using LIBDIR=$LIBDIR"
-          ls -l "$LIBDIR/libLLVM-12.so" "$LIBDIR/libLLVM.so"
+          LIBDIR="$(dirname "$FOUND")"
+          BASENAME="$(basename "$FOUND")"
+          echo "Detected LLVM dylib: $FOUND"
+          ln -sf "$BASENAME" "$LIBDIR/libLLVM-12.so"
+          ln -sf "$BASENAME" "$LIBDIR/libLLVM.so"
+          ls -l "$LIBDIR"/libLLVM*.so
 
-          # Export paths so linker & runtime tìm đúng
+          # Export search paths + toolchain C++
           echo "LLVM_SYS_120_PREFIX=$CLANG_DIR" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=$LIBDIR:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$LIBDIR:${LIBRARY_PATH:-}" >> $GITHUB_ENV
