@@ -68,7 +68,7 @@ jobs:
           fi
           cp -v target/release/libamice.so "$OUT_DIR/"
 
-      - name: Smoke test: load plugin with this clang
+      - name: Smoke test:load plugin with this clang
         run: |
           set -eux
           echo 'int main(){return 0;}' > /tmp/t.c
