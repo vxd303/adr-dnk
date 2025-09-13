@@ -56,11 +56,25 @@ jobs:
           ls -l "$CLANG_DIR/lib"  || true
           ls -l "$CLANG_DIR/lib64"|| true
 
-      - name: Configure env for llvm-sys 12 + use this clang++
+      - name: Normalize LLVM dylib name (create libLLVM.so → libLLVM-12.so)
         run: |
           set -eux
+          LIBDIR=""
+          if [ -f "$CLANG_DIR/lib/libLLVM-12.so" ]; then
+            LIBDIR="$CLANG_DIR/lib"
+          elif [ -f "$CLANG_DIR/lib64/libLLVM-12.so" ]; then
+            LIBDIR="$CLANG_DIR/lib64"
+          else
+            echo "libLLVM-12.so not found under $CLANG_DIR/{lib,lib64}"; exit 1
+          fi
+          ln -sf "$LIBDIR/libLLVM-12.so" "$LIBDIR/libLLVM.so"
+          echo "Using LIBDIR=$LIBDIR"
+          ls -l "$LIBDIR/libLLVM-12.so" "$LIBDIR/libLLVM.so"
+
+          # Export paths so linker & runtime tìm đúng
           echo "LLVM_SYS_120_PREFIX=$CLANG_DIR" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=$CLANG_DIR/lib:$CLANG_DIR/lib64:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$LIBDIR:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$LIBDIR:${LIBRARY_PATH:-}" >> $GITHUB_ENV
           echo "CXX=$CLANG_DIR/bin/clang++" >> $GITHUB_ENV
           echo "CXXFLAGS=-DLLVM_VERSION_MAJOR=12" >> $GITHUB_ENV
 
@@ -80,18 +94,25 @@ jobs:
             { print }
           ' "$f" > "$tmp"
           mv "$tmp" "$f"
-          # hiển thị đoạn đã patch (tham khảo)
-          grep -n "NoProfile" -n "$f" || true
+          grep -n "NoProfile" "$f" || true
 
       - name: Build libamice.so (feature LLVM 12.0)
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -eux
           cargo build --release --no-default-features --features llvm12-0
+          mkdir -p "$OUT_DIR"
           cp -v target/release/libamice.so "$OUT_DIR/"
 
       - name: Smoke test:load plugin with this clang
         run: |
           set -eux
           echo 'int main(){return 0;}' > /tmp/t.c
-          "$CLANG_DIR/bin/clang" -fpass-plugin="$OUT_DIR/libamice.so
+          "$CLANG_DIR/bin/clang" -fpass-plugin="$OUT_DIR/libamice.so" -O2 -xc /tmp/t.c -o /tmp/t
+
+      - name: Upload artifact (libamice.so for clang-r416183b1)
+        uses: actions/upload-artifact@v4
+        with:
+          name: libamice-ndk-r23-clang-r416183b1
+          path: ${{ env.OUT_DIR }}/libamice.so
+          if-no-files-found: error
