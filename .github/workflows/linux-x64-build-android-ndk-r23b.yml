@@ -14,7 +14,7 @@ jobs:
       AMICE_DIR: ${{ github.workspace }}/amice
       OUT_DIR: ${{ github.workspace }}/out
       CLANG_DIR: ${{ github.workspace }}/clang-r416183b1
-      # Clang unstripped (LLVM 12, r416183b1) theo yêu cầu
+      # Clang unstripped (LLVM 12, r416183b1)
       CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/219e6aaa8fecc0ab0df4e691a9645ba778267af2/clang-r416183b1.tar.gz
 
     steps:
@@ -61,23 +61,37 @@ jobs:
           set -eux
           FOUND="$(find "$CLANG_DIR" -maxdepth 3 -type f -name 'libLLVM-12*.so' | head -n1 || true)"
           if [ -z "$FOUND" ]; then
-            echo "libLLVM-12*.so not found under $CLANG_DIR; listing candidates:" >&2
-            find "$CLANG_DIR" -maxdepth 3 -type f -name 'libLLVM*.so' -ls || true
-            exit 1
+            echo "libLLVM-12*.so not found under $CLANG_DIR"; find "$CLANG_DIR" -maxdepth 3 -name 'libLLVM*.so' -ls || true; exit 1
           fi
           LIBDIR="$(dirname "$FOUND")"
           BASENAME="$(basename "$FOUND")"
-          echo "Detected LLVM dylib: $FOUND"
           ln -sf "$BASENAME" "$LIBDIR/libLLVM-12.so"
           ln -sf "$BASENAME" "$LIBDIR/libLLVM.so"
           ls -l "$LIBDIR"/libLLVM*.so
 
-          # Export search paths + toolchain C++
-          echo "LLVM_SYS_120_PREFIX=$CLANG_DIR" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=$LIBDIR:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=$LIBDIR:${LIBRARY_PATH:-}" >> $GITHUB_ENV
-          echo "CXX=$CLANG_DIR/bin/clang++" >> $GITHUB_ENV
-          echo "CXXFLAGS=-DLLVM_VERSION_MAJOR=12" >> $GITHUB_ENV
+          # Export search paths + toolchain C/C++
+          {
+            echo "LLVM_SYS_120_PREFIX=$CLANG_DIR"
+            echo "LD_LIBRARY_PATH=$LIBDIR:${LD_LIBRARY_PATH:-}"
+            echo "LIBRARY_PATH=$LIBDIR:${LIBRARY_PATH:-}"
+            echo "CC=$CLANG_DIR/bin/clang"
+            echo "CXX=$CLANG_DIR/bin/clang++"
+            echo "CXXFLAGS=-DLLVM_VERSION_MAJOR=12"
+          } >> "$GITHUB_ENV"
+
+          # Nếu có llvm-config, trỏ để llvm-sys dùng luôn
+          if [ -x "$CLANG_DIR/bin/llvm-config" ]; then
+            echo "LLVM_CONFIG_PATH=$CLANG_DIR/bin/llvm-config" >> "$GITHUB_ENV"
+          fi
+
+      - name: Use clang + ld.lld as Rust linker (avoid ld.bfd issues)
+        run: |
+          set -eux
+          # Dùng clang làm linker và ép dùng ld.lld của bộ này
+          {
+            echo "RUSTFLAGS=-C linker=$CLANG_DIR/bin/clang -C link-arg=-fuse-ld=lld"
+            echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$CLANG_DIR/bin/clang"
+          } >> "$GITHUB_ENV"
 
       - name: Patch for LLVM 12 (guard NoProfile enum)
         working-directory: ${{ env.AMICE_DIR }}
