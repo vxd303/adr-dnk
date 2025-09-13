@@ -13,9 +13,8 @@ jobs:
     env:
       AMICE_DIR: ${{ github.workspace }}/amice
       OUT_DIR: ${{ github.workspace }}/out
-
-      # Unstripped Clang (LLVM 12) bạn yêu cầu
       CLANG_DIR: ${{ github.workspace }}/clang-r416183b1
+      # Clang unstripped bạn yêu cầu (LLVM 12, r416183b1)
       CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/219e6aaa8fecc0ab0df4e691a9645ba778267af2/clang-r416183b1.tar.gz
 
     steps:
@@ -62,18 +61,27 @@ jobs:
           set -eux
           echo "LLVM_SYS_120_PREFIX=$CLANG_DIR" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=$CLANG_DIR/lib:$CLANG_DIR/lib64:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
-          # Ép cc-rs dùng clang++ này và truyền macro version
           echo "CXX=$CLANG_DIR/bin/clang++" >> $GITHUB_ENV
           echo "CXXFLAGS=-DLLVM_VERSION_MAJOR=12" >> $GITHUB_ENV
 
-      - name: Patch for LLVM 12 (NoProfile not available)
+      - name: Patch for LLVM 12 (guard NoProfile enum)
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -eux
-          # Guard dòng ENUM_CASE(... NoProfile ...) cho LLVM >= 14
-          sed -i 's/^\(\s*\)ENUM_CASE(llvm::Attribute::NoProfile, NoProfile)/\1#if defined(LLVM_VERSION_MAJOR) \&\& LLVM_VERSION_MAJOR \>= 14\
-\1ENUM_CASE(llvm::Attribute::NoProfile, NoProfile)\
-\1#endif/' amice-llvm/cpp/ffi.cc
+          f="amice-llvm/cpp/ffi.cc"
+          tmp="${f}.tmp"
+          awk '
+            /ENUM_CASE\(llvm::Attribute::NoProfile, NoProfile\)/ {
+              print "#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR >= 14";
+              print $0;
+              print "#endif";
+              next
+            }
+            { print }
+          ' "$f" > "$tmp"
+          mv "$tmp" "$f"
+          # hiển thị đoạn đã patch (tham khảo)
+          grep -n "NoProfile" -n "$f" || true
 
       - name: Build libamice.so (feature LLVM 12.0)
         working-directory: ${{ env.AMICE_DIR }}
@@ -82,15 +90,8 @@ jobs:
           cargo build --release --no-default-features --features llvm12-0
           cp -v target/release/libamice.so "$OUT_DIR/"
 
-      - name: Smoke test: load plugin with this clang
+      - name: Smoke test:load plugin with this clang
         run: |
           set -eux
           echo 'int main(){return 0;}' > /tmp/t.c
-          "$CLANG_DIR/bin/clang" -fpass-plugin="$OUT_DIR/libamice.so" -O2 -xc /tmp/t.c -o /tmp/t
-
-      - name: Upload artifact (libamice.so for clang-r416183b1)
-        uses: actions/upload-artifact@v4
-        with:
-          name: libamice-ndk-r23-clang-r416183b1
-          path: ${{ env.OUT_DIR }}/libamice.so
-          if-no-files-found: error
+          "$CLANG_DIR/bin/clang" -fpass-plugin="$OUT_DIR/libamice.so
