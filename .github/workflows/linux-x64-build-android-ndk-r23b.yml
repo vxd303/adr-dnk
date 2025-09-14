@@ -213,7 +213,7 @@ jobs:
           mkdir -p "$OUT_DIR"
           cp -v target-llvm12/release/libamice.so "$OUT_DIR/"
 
-      - name: Smoke test: load plugin with this clang
+      - name: Smoke test:load plugin with this clang
         shell: bash
         run: |
           set -euo pipefail
