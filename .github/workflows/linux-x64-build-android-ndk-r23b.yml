@@ -103,6 +103,29 @@ jobs:
             sed -i '1i #include <cstddef>' "$f"
           fi
 
+      - name: Patch ffi.cc (guard Attribute::NoProfile for LLVM<14)
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          f="amice-llvm/cpp/ffi.cc"
+          # Chỉ patch nếu có NoProfile trong file
+          if grep -q 'ENUM_CASE(llvm::Attribute::NoProfile, NoProfile)' "$f"; then
+            awk '
+              /ENUM_CASE\(llvm::Attribute::NoProfile, NoProfile\)/ {
+                print "#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR >= 14)";
+                print $0;
+                print "#endif";
+                next
+              }
+              { print }
+            ' "$f" > "$f.tmp"
+            mv "$f.tmp" "$f"
+          fi
+
+          echo "Preview (vùng có NoProfile sau patch):"
+          nl -ba "$f" | sed -n "1,260p" | sed -n "/NoProfile/,+3p" || true
+
       - name: Create cpp/llvm12_cfgshim.cc (No-Op CFG simplify + LLVMIsTypeAttribute stub)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
