@@ -138,36 +138,50 @@ jobs:
             echo '#endif'
           } >> "$f"
 
-      # ⬇️ Thêm shim symbol overload mới của SimplifyCFG NGAY TRONG ffi.cc (không đụng build.rs)
-      # và ép gọi đúng overload cũ bằng cast con trỏ hàm (tránh ambiguous)
+      # ⬇️ LLVM<13: cung cấp symbol overload mới bằng 1 shim ở global scope,
+      # đặt label đúng mangled name; thân gọi factory cũ zero-arg ⇒ tránh ambiguous
       - name: Append LLVM12 shim for createCFGSimplificationPass overload into ffi.cc
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
           f="amice-llvm/cpp/ffi.cc"
+
+          # Nếu đã chèn trước đó thì bỏ qua (re-run không chèn trùng)
+          if grep -q 'amice_cfg_simplify_shim' "$f"; then
+            echo "Shim already present, skipping"
+            exit 0
+          fi
+
           {
             echo '#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR < 13'
             echo '#include <functional>'
-            echo '#include "llvm/IR/LegacyPassManager.h"'
             echo '#include "llvm/Transforms/Scalar.h"'
             echo 'namespace llvm {'
             echo '  struct SimplifyCFGOptions;'
             echo '  class Function;'
-            echo '  // factory cũ có trong LLVM 12'
+            echo '  class FunctionPass;'
+            echo '  // Bản factory cũ có trong LLVM 12:'
             echo '  FunctionPass *createCFGSimplificationPass();'
-            echo '  // overload mới (LLVM 13+) — tự cung cấp và forward về bản cũ,'
-            echo '  // nhưng ép chọn overload cũ bằng cast con trỏ hàm để tránh ambiguous'
-            echo '  FunctionPass *createCFGSimplificationPass(SimplifyCFGOptions /*Opts*/, std::function<bool(Function const&)> /*Predicate*/) {'
-            echo '    using OldTy = FunctionPass *(*)();'
-            echo '    OldTy oldFn = reinterpret_cast<OldTy>(&::llvm::createCFGSimplificationPass);'
-            echo '    return oldFn();'
-            echo '  }'
+            echo '}'
+            echo ''
+            echo '// Định nghĩa shim ở global scope với symbol name của overload mới (LLVM>=13)'
+            echo 'extern "C" ::llvm::FunctionPass* amice_cfg_simplify_shim('
+            echo '    ::llvm::SimplifyCFGOptions,'
+            echo '    std::function<bool(::llvm::Function const&)>)'
+            echo '    asm("_ZN4llvm27createCFGSimplificationPassENS_18SimplifyCFGOptionsESt8functionIFbRKNS_8FunctionEEE");'
+            echo ''
+            echo '::llvm::FunctionPass* amice_cfg_simplify_shim('
+            echo '    ::llvm::SimplifyCFGOptions,'
+            echo '    std::function<bool(::llvm::Function const&)>) {'
+            echo '  // Gọi đúng factory cũ zero-arg có trong LLVM 12'
+            echo '  return ::llvm::createCFGSimplificationPass();'
             echo '}'
             echo '#endif'
           } >> "$f"
+
           echo "== Preview tail of ffi.cc =="
-          tail -n 80 "$f" || true
+          tail -n 120 "$f" || true
           
       - name: Build libamice.so (feature llvm12-0)
         shell: bash
