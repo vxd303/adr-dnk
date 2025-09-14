@@ -82,6 +82,7 @@ jobs:
             echo "CC=$CLANG_DIR/bin/clang"
             echo "CXX=$CLANG_DIR/bin/clang++"
             echo "CXXFLAGS=-fno-rtti -fno-exceptions -std=c++17 -DLLVM_VERSION_MAJOR=12"
+            echo "CARGO_TARGET_DIR=${{ env.AMICE_DIR }}/target-llvm12"
           } >> "$GITHUB_ENV"
 
           if [ -x "$CLANG_DIR/bin/llvm-config" ]; then
@@ -94,32 +95,10 @@ jobs:
           set -euo pipefail
           {
             echo "RUSTFLAGS=-C linker=$CLANG_DIR/bin/clang -C link-arg=-fuse-ld=lld"
-            echo "CARGO_TARGET_DIR=${{ env.AMICE_DIR }}/target-llvm12"
             echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$CLANG_DIR/bin/clang"
           } >> "$GITHUB_ENV"
 
-      - name: Patch for LLVM 12 (guard NoProfile enum)
-        shell: bash
-        working-directory: ${{ env.AMICE_DIR }}
-        run: |
-          set -euo pipefail
-          f="amice-llvm/cpp/ffi.cc"
-          if [ -f "$f" ]; then
-            tmp="${f}.tmp"
-            awk '
-              /ENUM_CASE\(llvm::Attribute::NoProfile, NoProfile\)/ {
-                print "#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR >= 14";
-                print $0;
-                print "#endif";
-                next
-              }
-              { print }
-            ' "$f" > "$tmp"
-            mv "$tmp" "$f"
-            grep -n "NoProfile" "$f" || true
-          fi
-
-          # Luôn reset lại ffi.cc về upstream để tránh sót patch lần trước
+      # 1) Luôn reset trước, rồi mới bắt đầu patch để tránh đè nhau
       - name: Reset ffi.cc to upstream
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
@@ -128,144 +107,102 @@ jobs:
           git checkout -- amice-llvm/cpp/ffi.cc
           echo "[OK] restored amice-llvm/cpp/ffi.cc"
 
-      # LLVM<13: cung cấp đủ 2 symbol của SimplifyCFG (zero-arg & new overload),
-      # mọi thứ ở GLOBAL SCOPE, không đặt namespace trong thân hàm.
-      - name: Patch (LLVM12 CFGSimplify shim via echo; global-scope only)
+      # 2) Guard cho Attribute::NoProfile (chỉ có ở LLVM >=14)
+      - name: Patch for LLVM 12 (guard NoProfile enum)
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          f="amice-llvm/cpp/ffi.cc"
+          # chèn newline trước để chắc chắn không dính cuối dòng
+          echo >> "$f"
+          tmp="${f}.tmp"
+          awk '
+            /ENUM_CASE\(llvm::Attribute::NoProfile, NoProfile\)/ {
+              print "#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR >= 14";
+              print $0;
+              print "#endif";
+              next
+            }
+            { print }
+          ' "$f" > "$tmp"
+          mv "$tmp" "$f"
+          grep -n "NoProfile" "$f" || true
+
+      # 3) Shim cho createCFGSimplificationPass (không dùng overload rỗng ở LLVM12)
+      - name: Patch (LLVM12 CFGSimplify shim via echo; global scope)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
           f="amice-llvm/cpp/ffi.cc"
 
-          # 1) xoá mọi forward-decl/gọi overload rỗng cũ (nếu upstream có)
+          # Dọn các forward-decl/gọi overload rỗng (nếu có trong upstream)
           sed -i '/FunctionPass[[:space:]]*\*[[:space:]]*createCFGSimplificationPass[[:space:]]*( *);/d' "$f" || true
           sed -i 's/::llvm::createCFGSimplificationPass()[[:space:]]*;/amice_cfgshim_call();/g' "$f" || true
 
-          # 2) chèn shim mới ở GLOBAL SCOPE (marker AMICE_CFGSIMPLIFY_SHIM_V2)
+          # Thêm 1 dòng trống rồi chèn shim (tránh dính vào dấu '}' trước đó)
+          echo >> "$f"
           {
-            echo '#if !defined(AMICE_CFGSIMPLIFY_SHIM_V2)'
-            echo '#define AMICE_CFGSIMPLIFY_SHIM_V2 1'
+            echo '#if !defined(AMICE_CFGSIMPLIFY_SHIM_V3)'
+            echo '#define AMICE_CFGSIMPLIFY_SHIM_V3 1'
             echo '#include <functional>'
             echo 'namespace llvm { class Function; class FunctionPass; struct SimplifyCFGOptions; }'
-            echo '#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR < 13)'
-            echo 'namespace llvm {'
-            echo '  FunctionPass *createCFGSimplificationPass('
-            echo '    unsigned /*Threshold*/,'
-            echo '    bool /*ForwardSwitchCond*/,'
-            echo '    bool /*ConvertSwitch*/,'
-            echo '    bool /*KeepLoops*/,'
-            echo '    bool /*SinkCommon*/,'
-            echo '    std::function<bool(const ::llvm::Function &)> /*Ftor*/);'
-            echo '}'
+            echo '#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR >= 13)'
+            echo '#include "llvm/Transforms/Scalar.h"'
+            echo '#include "llvm/Transforms/Utils/SimplifyCFGOptions.h"'
             echo '#endif'
             echo ''
-            echo '// Helper thực thi — không có namespace trong thân hàm'
             echo 'static ::llvm::FunctionPass *amice_cfgshim_call();'
             echo ''
-            echo '// Xuất symbol zero-arg (LLVM>=13 có thể tham chiếu):'
             echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_zero()'
             echo '  asm("_ZN4llvm27createCFGSimplificationPassEv");'
-            echo ''
-            echo '// Xuất symbol overload mới (SimplifyCFGOptions, Predicate):'
             echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_new('
-            echo '  ::llvm::SimplifyCFGOptions,'
-            echo '  std::function<bool(::llvm::Function const&)>)'
+            echo '  ::llvm::SimplifyCFGOptions, std::function<bool(::llvm::Function const&)>)'
             echo '  asm("_ZN4llvm27createCFGSimplificationPassENS_18SimplifyCFGOptionsESt8functionIFbRKNS_8FunctionEEE");'
             echo ''
             echo 'static ::llvm::FunctionPass *amice_cfgshim_call() {'
             echo '#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR >= 13)'
-            echo '  #include "llvm/Transforms/Scalar.h"'
-            echo '  #include "llvm/Transforms/Utils/SimplifyCFGOptions.h"'
             echo '  ::llvm::SimplifyCFGOptions Opts = ::llvm::SimplifyCFGOptions();'
             echo '  return ::llvm::createCFGSimplificationPass(Opts, nullptr);'
             echo '#else'
-            echo '  // LLVM 12: chỉ có biến thể 6 tham số'
-            echo '  return ::llvm::createCFGSimplificationPass('
-            echo '    /*Threshold*/1, /*ForwardSwitchCond*/false,'
-            echo '    /*ConvertSwitch*/false, /*KeepLoops*/true,'
-            echo '    /*SinkCommon*/false, /*Ftor*/nullptr);'
+            echo '  namespace llvm {'
+            echo '    ::llvm::FunctionPass *createCFGSimplificationPass('
+            echo '      unsigned, bool, bool, bool, bool,'
+            echo '      std::function<bool(const ::llvm::Function &)>);'
+            echo '  }'
+            echo '  using OldTy = ::llvm::FunctionPass *(*)(unsigned,bool,bool,bool,bool,std::function<bool(const ::llvm::Function&)>);'
+            echo '  OldTy oldFn = (OldTy)&::llvm::createCFGSimplificationPass;'
+            echo '  return oldFn(1,false,false,true,false,nullptr);'
             echo '#endif'
             echo '}'
             echo ''
-            echo '::llvm::FunctionPass* amice_cfgsimplify_zero() {'
-            echo '  return amice_cfgshim_call();'
-            echo '}'
-            echo ''
-            echo '::llvm::FunctionPass* amice_cfgsimplify_new('
-            echo '  ::llvm::SimplifyCFGOptions,'
-            echo '  std::function<bool(::llvm::Function const&)>) {'
-            echo '  return amice_cfgshim_call();'
-            echo '}'
-            echo '#endif // AMICE_CFGSIMPLIFY_SHIM_V2'
+            echo '::llvm::FunctionPass* amice_cfgsimplify_zero() { return amice_cfgshim_call(); }'
+            echo '::llvm::FunctionPass* amice_cfgsimplify_new(::llvm::SimplifyCFGOptions, std::function<bool(::llvm::Function const&)>) { return amice_cfgshim_call(); }'
+            echo '#endif // AMICE_CFGSIMPLIFY_SHIM_V3'
           } >> "$f"
 
-          echo "==== Tail ffi.cc (after shim) ===="
-          tail -n 120 "$f" || true
+          echo "==== Tail ffi.cc (after CFG shim) ===="
+          tail -n 80 "$f" || true
 
-      # STUB LLVMIsTypeAttribute cho LLVM<13 (dùng echo để tránh lỗi YAML)
+      # 4) Stub LLVMIsTypeAttribute cho LLVM<13 (tránh thiếu symbol từ C API)
       - name: Patch for LLVM 12 (stub LLVMIsTypeAttribute for LLVM<13)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
           f="amice-llvm/cpp/ffi.cc"
+          echo >> "$f"
           {
             echo '#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR < 13'
             echo 'extern "C" {'
             echo '  typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;'
             echo '  typedef int LLVMBool;'
-            echo '  LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef /*A*/) {'
-            echo '    return 0;'
-            echo '  }'
+            echo '  LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef) { return 0; }'
             echo '}'
             echo '#endif'
           } >> "$f"
 
-           # LLVM<13: Cấp symbol overload mới bằng shim; gọi trực tiếp symbol zero-arg cũ qua tên mangled.
-      - name: Append LLVM12 shim for createCFGSimplificationPass overload into ffi.cc
-        shell: bash
-        working-directory: ${{ env.AMICE_DIR }}
-        run: |
-          set -euo pipefail
-          f="amice-llvm/cpp/ffi.cc"
-          # Tránh chèn trùng khi re-run
-          if grep -q '_ZN4llvm27createCFGSimplificationPassEv' "$f" && grep -q 'amice_cfg_simplify_shim' "$f"; then
-            echo "Shim already present, skipping"
-            exit 0
-          fi
-
-          {
-            echo '#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR < 13'
-            echo '#include <functional>'
-            echo '#include "llvm/Transforms/Scalar.h"'
-            echo 'namespace llvm {'
-            echo '  struct SimplifyCFGOptions;'
-            echo '  class Function;'
-            echo '  class FunctionPass;'
-            echo '}'
-            echo ''
-            echo '// Trỏ trực tiếp tới symbol zero-arg có sẵn trong LLVM12:'
-            echo 'extern "C" ::llvm::FunctionPass* amice_old_cfgsimplify()'
-            echo '  asm("_ZN4llvm27createCFGSimplificationPassEv");'
-            echo ''
-            echo '// Tạo symbol overload mới (LLVM>=13) bằng đúng mangled name,'
-            echo '// thân shim chỉ forward sang symbol zero-arg cũ để tránh thiếu symbol khi load plugin.'
-            echo 'extern "C" ::llvm::FunctionPass* amice_cfg_simplify_shim('
-            echo '    ::llvm::SimplifyCFGOptions,'
-            echo '    std::function<bool(::llvm::Function const&)>)'
-            echo '    asm("_ZN4llvm27createCFGSimplificationPassENS_18SimplifyCFGOptionsESt8functionIFbRKNS_8FunctionEEE");'
-            echo ''
-            echo '::llvm::FunctionPass* amice_cfg_simplify_shim('
-            echo '    ::llvm::SimplifyCFGOptions,'
-            echo '    std::function<bool(::llvm::Function const&)>) {'
-            echo '  return amice_old_cfgsimplify();'
-            echo '}'
-            echo '#endif'
-          } >> "$f"
-
-          echo "== Preview tail of ffi.cc =="
-          tail -n 120 "$f" || true
-          
       - name: Build libamice.so (feature llvm12-0)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
@@ -276,7 +213,7 @@ jobs:
           mkdir -p "$OUT_DIR"
           cp -v target-llvm12/release/libamice.so "$OUT_DIR/"
 
-      - name: Smoke test:load plugin with this clang
+      - name: Smoke test: load plugin with this clang
         shell: bash
         run: |
           set -euo pipefail
