@@ -137,7 +137,7 @@ jobs:
           echo '    llvm::BlockFrequencyInfo *BFI, llvm::BranchProbabilityInfo *BPI,' >> "$SHIM_FILE"
           echo '    llvm::AssumptionCache *AC, bool AllowVarArgs, bool Suffix,' >> "$SHIM_FILE"
           echo '    std::string /*SuffixName*/)' >> "$SHIM_FILE"
-          echo '    asm("_ZN4llvm13CodeExtractorC1ENS_8ArrayRefIPNS_10BasicBlockEEEPNS_13DominatorTreeEbPNS_18BlockFrequencyInfoEPNS_21BranchProbabilityInfoEPNS_15AssumptionCacheEbbNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE");' >> "$SHIM_FILE"
+          echo '    asm("_ZN4llvm13CodeExtractorC1ENS_8ArrayRefIPNS_10BasicBlockEEEPNS_13DominatorTreeEbPNS_18BlockFrequencyInfoEPNS_21BranchProbabilityInfoEPNS_15AssumptionCacheEbbNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")' >> "$SHIM_FILE"
           echo '    : CodeExtractor(Blocks, DT, AggregateArgs, BFI, BPI, AC, AllowVarArgs, Suffix)' >> "$SHIM_FILE"
           echo '{' >> "$SHIM_FILE"
           echo '    // The body is empty as the real work is done by the chained constructor.' >> "$SHIM_FILE"
