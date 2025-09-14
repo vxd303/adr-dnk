@@ -20,12 +20,11 @@ jobs:
       - name: Checkout (this repo)
         uses: actions/checkout@v4
 
-      - name: Checkout amice source (locked to a compatible commit for LLVM 12)
+      - name: Checkout amice source
         uses: actions/checkout@v4
         with:
           repository: fuqiuluo/amice
-          # This commit from early 2023 is known to be more compatible with LLVM 12
-          ref: e76878b652e722891f737e692cd86b6a38541535
+          ref: master
           path: amice
 
       - name: Setup Rust (stable)
@@ -91,21 +90,104 @@ jobs:
             echo "LLVM_CONFIG_PATH=$CLANG_DIR/bin/llvm-config" >> "$GITHUB_ENV"
           fi
 
-      - name: Patch ffi.cc (add stub for LLVMIsTypeAttribute, missing in LLVM < 13)
+      - name: Reset ffi.cc to upstream
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          git checkout -- amice-llvm/cpp/ffi.cc
+          echo "[OK] restored amice-llvm/cpp/ffi.cc"
+
+      - name: Patch ffi.cc (guard Attribute::NoProfile for LLVM<14)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
           f="amice-llvm/cpp/ffi.cc"
-          # Add a simple stub at the end for a C-API function missing in LLVM 12
-          echo '' >> "$f"
-          echo '#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR < 13)' >> "$f"
-          echo 'extern "C" {' >> "$f"
-          echo '  typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;' >> "$f"
-          echo '  typedef int LLVMBool;' >> "$f"
-          echo '  LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef) { return 0; }' >> "$f"
-          echo '}' >> "$f"
-          echo '#endif' >> "$f"
+          if grep -q 'ENUM_CASE(llvm::Attribute::NoProfile, NoProfile)' "$f"; then
+            awk '
+              /ENUM_CASE\(llvm::Attribute::NoProfile, NoProfile\)/ {
+                print "#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR >= 14)";
+                print $0;
+                print "#endif";
+                next
+              }
+              { print }
+            ' "$f" > "$f.tmp"
+            mv "$f.tmp" "$f"
+          fi
+
+      - name: Create LLVM12 shims (CodeExtractor ctor + LLVMIsTypeAttribute)
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          cat > amice-llvm/cpp/llvm12_shims.cc <<'EOF'
+          #include <stdint.h>
+          #if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR < 13)
+          extern "C" {
+
+          // --- LLVMIsTypeAttribute is missing in LLVM 12 C-API
+          #ifndef LLVM_ATTRIBUTE_REF_FWD
+          typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;
+          typedef int LLVMBool;
+          #define LLVM_ATTRIBUTE_REF_FWD 1
+          #endif
+          LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef) { return 0; }
+
+          // --- CodeExtractor new-ctor (with std::string suffix) -> forward to old-ctor (no suffix)
+          // old ctor
+          void amice_CodeExtractor_C1_old(
+              void* self,
+              void* arrayRefBB,
+              void* DT,
+              bool aggregateArgs,
+              void* BFI,
+              void* BPI,
+              void* AC,
+              bool allowVarAlloca,
+              bool allowAlloca)
+              asm("_ZN4llvm13CodeExtractorC1ENS_8ArrayRefIPNS_10BasicBlockEEEPNS_13DominatorTreeEbPNS_18BlockFrequencyInfoEPNS_21BranchProbabilityInfoEPNS_15AssumptionCacheEbb");
+
+          // new ctor (extra std::string at tail) – define symbol and tail-call old
+          void _ZN4llvm13CodeExtractorC1ENS_8ArrayRefIPNS_10BasicBlockEEEPNS_13DominatorTreeEbPNS_18BlockFrequencyInfoEPNS_21BranchProbabilityInfoEPNS_15AssumptionCacheEbbNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE(
+              void* self,
+              void* arrayRefBB,
+              void* DT,
+              bool aggregateArgs,
+              void* BFI,
+              void* BPI,
+              void* AC,
+              bool allowVarAlloca,
+              bool allowAlloca,
+              void* /*const std::string&*/)
+          {
+              amice_CodeExtractor_C1_old(self, arrayRefBB, DT, aggregateArgs, BFI, BPI, AC, allowVarAlloca, allowAlloca);
+          }
+
+          } // extern "C"
+          #endif // LLVM<13
+          EOF
+
+      - name: Make build.rs compile llvm12_shims.cc
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          br="amice-llvm/build.rs"
+          # Chèn thêm .file("cpp/llvm12_shims.cc") ngay sau .file("cpp/ffi.cc")
+          sed -i 's#\.file("cpp/ffi\.cc")#\.file("cpp/ffi.cc")\n        .file("cpp/llvm12_shims.cc")#' "$br"
+          echo "== Snippet in build.rs =="
+          nl -ba "$br" | sed -n '1,120p'
+
+      - name: (Optional) Soften CodeExtractor call sites (drop suffix literal if present)
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          f="amice-llvm/cpp/ffi.cc"
+          # Nếu upstream có gọi với ", false, \".split\"" thì bỏ đi cho khớp LLVM12
+          sed -i 's/,\s*false\s*,\s*"\.split"//g' "$f" || true
 
       - name: Build libamice.so (feature llvm12-0)
         shell: bash
@@ -115,6 +197,7 @@ jobs:
           cargo clean
           cargo build --release --no-default-features --features llvm12-0
           mkdir -p "$OUT_DIR"
+          # amice dùng CARGO_TARGET_DIR đã set -> file ở target-llvm12
           cp -v target-llvm12/release/libamice.so "$OUT_DIR/"
 
       - name: Smoke test:load plugin with this clang
@@ -130,4 +213,3 @@ jobs:
           name: libamice-ndk-r23b-clang-r416183c1
           path: ${{ env.OUT_DIR }}/libamice.so
           if-no-files-found: error
-
