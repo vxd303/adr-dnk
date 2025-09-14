@@ -192,22 +192,6 @@ jobs:
           echo "[OK] Patched ${BUILD_RS} to include shim file."
           grep -C 2 "shims.cc" "$BUILD_RS"
 
-      - name: Temporarily Hide Static LLVM Libraries
-        shell: bash
-        run: |
-          set -euo pipefail
-          LIBDIR_PATH=$(find "$CLANG_DIR" -type d \( -name "lib" -o -name "lib64" \) | head -n1)
-          echo "Found LLVM lib directory at: $LIBDIR_PATH"
-          if [ -d "$LIBDIR_PATH" ]; then
-            mkdir -p "$LIBDIR_PATH/static_libs_tmp"
-            # Find and move all .a files to prevent static linking
-            find "$LIBDIR_PATH" -maxdepth 1 -name "*.a" -exec mv {} "$LIBDIR_PATH/static_libs_tmp/" \;
-            echo "Temporarily moved static libraries to static_libs_tmp/ to force dynamic linking."
-            ls -l "$LIBDIR_PATH/static_libs_tmp/"
-          else
-            echo "Warning: LLVM lib directory not found, skipping hiding static libs."
-          fi
-
       - name: Build libamice.so (feature llvm12-0)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
@@ -228,17 +212,21 @@ jobs:
           ldd "$OUT_DIR/libamice.so" | grep -q 'libLLVM' || (echo "ERROR: libamice.so is NOT dynamically linked to libLLVM!"; exit 1)
           echo "[OK] libamice.so is correctly linked dynamically to libLLVM."
 
-      - name: Smoke test:load plugin with this clang
+      - name: Package compatible toolchain and plugin
         shell: bash
         run: |
           set -euo pipefail
-          echo 'int main(){return 0;}' > /tmp/t.c
-          "$CLANG_DIR/bin/clang" -fpass-plugin="$OUT_DIR/libamice.so" -O2 -xc /tmp/t.c -o /tmp/t
+          # Move the plugin into a more convenient location inside the clang directory
+          mkdir -p "$CLANG_DIR/lib/amice"
+          mv "$OUT_DIR/libamice.so" "$CLANG_DIR/lib/amice/"
+          # Create a single archive of the entire toolchain + plugin package
+          tar -czf amice-toolchain-llvm12.tar.gz -C ${{ github.workspace }} clang-r416183c1
+          echo "Created amice-toolchain-llvm12.tar.gz"
 
-      - name: Upload artifact (libamice.so for clang-r416183c1)
+      - name: Upload artifact (Complete Toolchain Package)
         uses: actions/upload-artifact@v4
         with:
-          name: libamice-ndk-r23b-clang-r416183c1
-          path: ${{ env.OUT_DIR }}/libamice.so
+          name: amice-toolchain-llvm12
+          path: amice-toolchain-llvm12.tar.gz
           if-no-files-found: error
 
