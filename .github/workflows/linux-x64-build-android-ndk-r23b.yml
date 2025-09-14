@@ -194,7 +194,7 @@ jobs:
           echo '  FunctionPass* createCFGSimplificationPass(' >> "$f"
           echo '      unsigned, bool, bool, bool, bool, std::function<bool(const ::llvm::Function&)>);' >> "$f"
           echo '  Pass* createPrintModulePass(raw_ostream& OS, const std::string& Banner = "");' >> "$f"
-          echo '  FunctionPass* createPrintFunctionPass(raw_ostream& OS, const std::string& Banner = "");' >> "$f"
+          echo '  FunctionPass* createPrintFunctionPass(raw_ostream& OS, const std::string& Banner);' >> "$f"
           echo '}' >> "$f"
           echo '#endif' >> "$f"
           echo '' >> "$f"
@@ -238,7 +238,7 @@ jobs:
           mkdir -p "$OUT_DIR"
           cp -v target-llvm12/release/libamice.so "$OUT_DIR/"
 
-      - name: Smoke test:load plugin with this clang
+      - name: Smoke test: load plugin with this clang
         shell: bash
         run: |
           set -euo pipefail
@@ -251,4 +251,3 @@ jobs:
           name: libamice-ndk-r23b-clang-r416183c1
           path: ${{ env.OUT_DIR }}/libamice.so
           if-no-files-found: error
-
