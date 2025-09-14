@@ -1,4 +1,4 @@
-name: linux-x64-build-android-ndk-r23b (libamice.so via clang-r416183c1)
+name: linux-x-build-android-ndk-r23b (libamice.so via clang-r416183c1)
 
 on:
   push:
@@ -103,26 +103,6 @@ jobs:
             sed -i '1i #include <cstddef>' "$f"
           fi
 
-      - name: Patch build.rs to compile extra shim TU (cpp/llvm12_cfgshim.cc)
-        shell: bash
-        working-directory: ${{ env.AMICE_DIR }}
-        run: |
-          set -euo pipefail
-          br="amice-llvm/build.rs"
-          if ! grep -q 'llvm12_cfgshim.cc' "$br"; then
-            awk '
-              /[.]file\("cpp\/ffi[.]cc"\)/ && !done {
-                print $0
-                print "        .file(\"cpp/llvm12_cfgshim.cc\")"
-                done=1
-                next
-              }
-              { print $0 }
-            ' "$br" > "${br}.tmp"
-            mv "${br}.tmp" "$br"
-          fi
-          grep -n 'llvm12_cfgshim.cc' "$br" || true
-
       - name: Create cpp/llvm12_cfgshim.cc (No-Op CFG simplify + LLVMIsTypeAttribute stub)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
@@ -130,7 +110,9 @@ jobs:
           set -euo pipefail
           mkdir -p amice-llvm/cpp
           SHIM_FILE="amice-llvm/cpp/llvm12_cfgshim.cc"
-          echo '// This translation unit provides missing createCFGSimplificationPass symbols for LLVM 12-based NDKs' > "$SHIM_FILE"
+          echo '// This TU provides missing createCFGSimplificationPass symbols for LLVM 12-based NDKs' > "$SHIM_FILE"
+          echo '// and a stub for LLVMIsTypeAttribute (LLVM<13). We avoid editing ffi.cc to keep patches simple.' >> "$SHIM_FILE"
+          echo '' >> "$SHIM_FILE"
           echo '#include <functional>' >> "$SHIM_FILE"
           echo '#include "llvm/IR/Function.h"' >> "$SHIM_FILE"
           echo '#include "llvm/Pass.h"' >> "$SHIM_FILE"
@@ -167,7 +149,7 @@ jobs:
           echo '  return new NoOpCFGSimplifyPass();' >> "$SHIM_FILE"
           echo '}' >> "$SHIM_FILE"
           echo '' >> "$SHIM_FILE"
-          echo '// 3) legacy 6-params variant used around LLVM 11/12 in some headers' >> "$SHIM_FILE"
+          echo '// 3) legacy 6-params variant that some LLVM 12 headers reference' >> "$SHIM_FILE"
           echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_legacy(' >> "$SHIM_FILE"
           echo '  unsigned, bool, bool, bool, bool,' >> "$SHIM_FILE"
           echo '  std::function<bool(::llvm::Function const&)>)' >> "$SHIM_FILE"
@@ -187,6 +169,28 @@ jobs:
           echo '}' >> "$SHIM_FILE"
           echo '' >> "$SHIM_FILE"
           echo '#endif /* LLVM_VERSION_MAJOR < 13 */' >> "$SHIM_FILE"
+
+      - name: Make build.rs compile both ffi.cc and llvm12_cfgshim.cc
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          br="amice-llvm/build.rs"
+          # Case 1: .file("cpp/ffi.cc") -> replace with .files(&["cpp/ffi.cc","cpp/llvm12_cfgshim.cc"])
+          if grep -q '\.file("cpp/ffi\.cc")' "$br"; then
+            sed -i 's/\.file("cpp\/ffi\.cc")/.files(\&\["cpp\/ffi.cc","cpp\/llvm12_cfgshim.cc"\])/' "$br"
+          # Case 2: already uses .files(&[ ... ]) -> inject shim if missing
+          elif grep -q '\.files(\&\[' "$br"; then
+            if ! grep -q 'cpp/llvm12_cfgshim.cc' "$br"; then
+              # Insert shim path right after the opening bracket of the files array
+              sed -i '0,/\.files(\&\[/s//.files(\&\["cpp\/llvm12_cfgshim.cc", /' "$br"
+            fi
+          else
+            echo "WARN: build.rs does not contain .file or .files pattern I know; printing for review:"
+            nl -ba "$br" | sed -n '1,200p'
+          fi
+          echo "=== build.rs >>"
+          nl -ba "$br" | sed -n '1,200p'
 
       - name: Build libamice.so (feature llvm12-0)
         shell: bash
