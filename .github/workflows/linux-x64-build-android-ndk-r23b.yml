@@ -84,6 +84,8 @@ jobs:
             echo "RUSTFLAGS=-C linker=$CLANG_DIR/bin/clang -C link-arg=-fuse-ld=lld"
             echo "CARGO_TARGET_DIR=${{ env.AMICE_DIR }}/target-llvm12"
             echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$CLANG_DIR/bin/clang"
+            # Force dynamic linking by specifying the shared library name
+            echo "LLVM_SYS_120_SHARED_LIB_NAME=$BASENAME"
           } >> "$GITHUB_ENV"
 
           if [ -x "$CLANG_DIR/bin/llvm-config" ]; then
