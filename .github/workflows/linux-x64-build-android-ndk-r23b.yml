@@ -98,30 +98,6 @@ jobs:
           git checkout -- amice-llvm/cpp/ffi.cc
           echo "[OK] restored amice-llvm/cpp/ffi.cc"
 
-      - name: Patch ffi.cc (drop LLVMIsTypeAttribute on LLVM<13)
-        shell: bash
-        working-directory: ${{ env.AMICE_DIR }}
-        run: |
-          set -euo pipefail
-          f="amice-llvm/cpp/ffi.cc"
-          # Chèn macro ngay đầu file để mọi chỗ dùng đều được thay thế
-          awk 'BEGIN{
-            print "#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR < 13)"
-            print "  // NDK r23b (LLVM 12) không có LLVMIsTypeAttribute trong C-API."
-            print "  // Trên LLVM<13, coi như luôn = false để khỏi tạo reference tới symbol."
-            print "  #ifndef LLVM_ATTRIBUTE_REF_FWD"
-            print "    typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;"
-            print "    typedef int LLVMBool;"
-            print "  #define LLVM_ATTRIBUTE_REF_FWD 1"
-            print "  #endif"
-            print "  #define LLVMIsTypeAttribute(_A_) 0"
-            print "#endif"
-          } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-
-          echo "Preview header lines:"
-          head -n 30 "$f" || true
-
-
       - name: Patch ffi.cc (guard Attribute::NoProfile for LLVM<14)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
@@ -141,18 +117,18 @@ jobs:
             mv "$f.tmp" "$f"
           fi
 
-      - name: Patch ffi.cc (use CFGSimplify old API for LLVM<13)
+      - name: Patch ffi.cc (use CFGSimplify old API and stub LLVMIsTypeAttribute for LLVM<13)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
           f="amice-llvm/cpp/ffi.cc"
 
-          # 1) Add helper AMICE_makeCFGSimplify() to the end of the file
+          # 1) Add helper code to the end of the file
           echo '' >> "$f"
-          echo '// ===== AMICE CFGSimplify helper (portable across LLVM 12+)' >> "$f"
-          echo '#if !defined(AMICE_CFGSIMPLIFY_HELPER)' >> "$f"
-          echo '#define AMICE_CFGSIMPLIFY_HELPER 1' >> "$f"
+          echo '// ===== AMICE compatibility helpers (portable across LLVM 12+)' >> "$f"
+          echo '#if !defined(AMICE_COMPAT_HELPERS)' >> "$f"
+          echo '#define AMICE_COMPAT_HELPERS 1' >> "$f"
           echo '#include <functional>' >> "$f"
           echo 'namespace llvm { class Function; class FunctionPass; }' >> "$f"
           echo '#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR < 13)' >> "$f"
@@ -181,8 +157,18 @@ jobs:
           echo '      /*SinkCommon*/false, /*Ftor*/nullptr);' >> "$f"
           echo '#endif' >> "$f"
           echo '}' >> "$f"
-          echo '#endif // AMICE_CFGSIMPLIFY_HELPER' >> "$f"
-          echo '// ===== end helper' >> "$f"
+          echo '' >> "$f"
+          echo '// Stub for missing LLVMIsTypeAttribute in LLVM < 13' >> "$f"
+          echo '#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR < 13)' >> "$f"
+          echo 'extern "C" {' >> "$f"
+          echo '  typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;' >> "$f"
+          echo '  typedef int LLVMBool;' >> "$f"
+          echo '  LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef) { return 0; }' >> "$f"
+          echo '}' >> "$f"
+          echo '#endif' >> "$f"
+          echo '' >> "$f"
+          echo '#endif // AMICE_COMPAT_HELPERS' >> "$f"
+          echo '// ===== end helpers' >> "$f"
 
           # 2) Replace all calls to createCFGSimplificationPass(...) with the helper
           sed -E -i 's/::llvm::createCFGSimplificationPass\([^;]*\)/AMICE_makeCFGSimplify()/g' "$f"
