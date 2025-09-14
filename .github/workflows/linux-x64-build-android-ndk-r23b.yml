@@ -170,6 +170,12 @@ jobs:
           echo '    return llvm::createPrintModulePass(OS, Banner);' >> "$SHIM_FILE"
           echo '}' >> "$SHIM_FILE"
           echo '' >> "$SHIM_FILE"
+          echo '// Shim 6: Provide the missing createPrintFunctionPass overload' >> "$SHIM_FILE"
+          echo 'extern "C" ::llvm::Pass* amice_print_function_pass_stub(::llvm::raw_ostream& OS, const std::string& Banner) asm("_ZN4llvm23createPrintFunctionPassERNS_11raw_ostreamERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE");' >> "$SHIM_FILE"
+          echo '::llvm::Pass* amice_print_function_pass_stub(::llvm::raw_ostream& OS, const std::string& Banner) {' >> "$SHIM_FILE"
+          echo '    return llvm::createPrintFunctionPass(OS, Banner);' >> "$SHIM_FILE"
+          echo '}' >> "$SHIM_FILE"
+          echo '' >> "$SHIM_FILE"
           echo '#endif' >> "$SHIM_FILE"
           echo "[OK] Created shim file at ${SHIM_FILE}"
 
