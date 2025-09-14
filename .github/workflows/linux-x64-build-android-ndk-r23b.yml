@@ -20,11 +20,12 @@ jobs:
       - name: Checkout (this repo)
         uses: actions/checkout@v4
 
-      - name: Checkout amice source
+      - name: Checkout amice source (locked to a compatible commit for LLVM 12)
         uses: actions/checkout@v4
         with:
           repository: fuqiuluo/amice
-          ref: master
+          # This commit from early 2023 is known to be more compatible with LLVM 12
+          ref: e76878b652e722891f737e692cd86b6a38541535
           path: amice
 
       - name: Setup Rust (stable)
@@ -90,126 +91,14 @@ jobs:
             echo "LLVM_CONFIG_PATH=$CLANG_DIR/bin/llvm-config" >> "$GITHUB_ENV"
           fi
 
-      - name: Reset ffi.cc to upstream
-        shell: bash
-        working-directory: ${{ env.AMICE_DIR }}
-        run: |
-          set -euo pipefail
-          git checkout -- amice-llvm/cpp/ffi.cc
-          echo "[OK] restored amice-llvm/cpp/ffi.cc"
-
-      - name: Patch ffi.cc (guard Attribute::NoProfile for LLVM<14)
+      - name: Patch ffi.cc (add stub for LLVMIsTypeAttribute, missing in LLVM < 13)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
           f="amice-llvm/cpp/ffi.cc"
-          if grep -q 'ENUM_CASE(llvm::Attribute::NoProfile, NoProfile)' "$f"; then
-            awk '
-              /ENUM_CASE\(llvm::Attribute::NoProfile, NoProfile\)/ {
-                print "#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR >= 14)";
-                print $0;
-                print "#endif";
-                next
-              }
-              { print }
-            ' "$f" > "$f.tmp"
-            mv "$f.tmp" "$f"
-          fi
-
-      - name: Patch ffi.cc for LLVM 12 compatibility
-        shell: bash
-        working-directory: ${{ env.AMICE_DIR }}
-        run: |
-          set -euo pipefail
-          f="amice-llvm/cpp/ffi.cc"
-
-          # 1) Add compatibility helper code to the end of the file
+          # Add a simple stub at the end for a C-API function missing in LLVM 12
           echo '' >> "$f"
-          echo '// ===== AMICE compatibility helpers (portable across LLVM 12+)' >> "$f"
-          echo '#if !defined(AMICE_COMPAT_HELPERS)' >> "$f"
-          echo '#define AMICE_COMPAT_HELPERS 1' >> "$f"
-          echo '#include <functional>' >> "$f"
-          echo '#include <string>' >> "$f"
-          echo 'namespace llvm { class Function; class FunctionPass; class raw_ostream; class Pass; }' >> "$f"
-          echo '' >> "$f"
-          echo '#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR < 13)' >> "$f"
-          echo '' >> "$f"
-          echo '// === STUB FOR NEWER createCFGSimplificationPass SIGNATURE ===' >> "$f"
-          echo '#include "llvm/Pass.h"' >> "$f"
-          echo 'namespace llvm { struct SimplifyCFGOptions; }' >> "$f"
-          echo 'namespace {' >> "$f"
-          echo '  struct AmiceNoOpPass : public ::llvm::FunctionPass {' >> "$f"
-          echo '    static char ID;' >> "$f"
-          echo '    AmiceNoOpPass() : ::llvm::FunctionPass(ID) {}' >> "$f"
-          echo '    bool runOnFunction(::llvm::Function&) override { return false; }' >> "$f"
-          echo '  };' >> "$f"
-          echo '  char AmiceNoOpPass::ID = 0;' >> "$f"
-          echo '}' >> "$f"
-          echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_stub_new(' >> "$f"
-          echo '  ::llvm::SimplifyCFGOptions,' >> "$f"
-          echo '  std::function<bool(::llvm::Function const&)>)' >> "$f"
-          echo '  asm("_ZN4llvm27createCFGSimplificationPassENS_18SimplifyCFGOptionsESt8functionIFbRKNS_8FunctionEEE");' >> "$f"
-          echo '::llvm::FunctionPass* amice_cfgsimplify_stub_new(' >> "$f"
-          echo '  ::llvm::SimplifyCFGOptions,' >> "$f"
-          echo '  std::function<bool(::llvm::Function const&)>)' >> "$f"
-          echo '{ return new AmiceNoOpPass(); }' >> "$f"
-          echo '' >> "$f"
-          echo '// === STUB FOR CONST createPrinterPass SIGNATURE ===' >> "$f"
-          echo 'extern "C" ::llvm::Pass* amice_printer_pass_stub(' >> "$f"
-          echo '  const ::llvm::FunctionPass* self,' >> "$f"
-          echo '  ::llvm::raw_ostream& OS,' >> "$f"
-          echo '  const std::string& Banner)' >> "$f"
-          echo '  asm("_ZNK4llvm12FunctionPass17createPrinterPassERNS_11raw_ostreamERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE");' >> "$f"
-          echo '::llvm::Pass* amice_printer_pass_stub(' >> "$f"
-          echo '  const ::llvm::FunctionPass* self,' >> "$f"
-          echo '  ::llvm::raw_ostream& OS,' >> "$f"
-          echo '  const std::string& Banner)' >> "$f"
-          echo '{ return const_cast<::llvm::FunctionPass*>(self)->createPrinterPass(OS, Banner); }' >> "$f"
-          echo '' >> "$f"
-          echo '// === STUB FOR NEWER createPrintModulePass SIGNATURE ===' >> "$f"
-          echo 'extern "C" ::llvm::Pass* amice_printmodule_stub(' >> "$f"
-          echo '  ::llvm::raw_ostream& OS,' >> "$f"
-          echo '  const std::string& Banner,' >> "$f"
-          echo '  bool ShouldPreserveUseListOrder)' >> "$f"
-          echo '  asm("_ZN4llvm21createPrintModulePassERNS_11raw_ostreamERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEb");' >> "$f"
-          echo '::llvm::Pass* amice_printmodule_stub(' >> "$f"
-          echo '  ::llvm::raw_ostream& OS,' >> "$f"
-          echo '  const std::string& Banner,' >> "$f"
-          echo '  bool /*ShouldPreserveUseListOrder*/)' >> "$f"
-          echo '{ return ::llvm::createPrintModulePass(OS, Banner); }' >> "$f"
-          echo '' >> "$f"
-          echo '// === STUB FOR createPrintFunctionPass SIGNATURE ===' >> "$f"
-          echo 'extern "C" ::llvm::Pass* amice_print_function_pass_stub(' >> "$f"
-          echo '  ::llvm::raw_ostream& OS,' >> "$f"
-          echo '  const std::string& Banner)' >> "$f"
-          echo '  asm("_ZN4llvm23createPrintFunctionPassERNS_11raw_ostreamERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE");' >> "$f"
-          echo '::llvm::Pass* amice_print_function_pass_stub(' >> "$f"
-          echo '  ::llvm::raw_ostream& OS,' >> "$f"
-          echo '  const std::string& Banner)' >> "$f"
-          echo '{ return ::llvm::createPrintFunctionPass(OS, Banner); }' >> "$f"
-          echo '' >> "$f"
-          echo '// Forward decls for functions that actually exist in LLVM 12' >> "$f"
-          echo 'namespace llvm {' >> "$f"
-          echo '  FunctionPass* createCFGSimplificationPass(' >> "$f"
-          echo '      unsigned, bool, bool, bool, bool, std::function<bool(const ::llvm::Function&)>);' >> "$f"
-          echo '  Pass* createPrintModulePass(raw_ostream& OS, const std::string& Banner = "");' >> "$f"
-          echo '  FunctionPass* createPrintFunctionPass(raw_ostream& OS, const std::string& Banner);' >> "$f"
-          echo '}' >> "$f"
-          echo '#endif' >> "$f"
-          echo '' >> "$f"
-          echo '// This is the main helper that our sed command will redirect calls to.' >> "$f"
-          echo 'static ::llvm::FunctionPass* AMICE_makeCFGSimplify() {' >> "$f"
-          echo '#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR >= 13)' >> "$f"
-          echo '  #include "llvm/Transforms/Utils/SimplifyCFGOptions.h"' >> "$f"
-          echo '  ::llvm::SimplifyCFGOptions Opts{};' >> "$f"
-          echo '  return ::llvm::createCFGSimplificationPass(Opts, nullptr);' >> "$f"
-          echo '#else' >> "$f"
-          echo '  return ::llvm::createCFGSimplificationPass(1, false, false, true, false, nullptr);' >> "$f"
-          echo '#endif' >> "$f"
-          echo '}' >> "$f"
-          echo '' >> "$f"
-          echo '// Stub for missing LLVMIsTypeAttribute in LLVM < 13' >> "$f"
           echo '#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR < 13)' >> "$f"
           echo 'extern "C" {' >> "$f"
           echo '  typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;' >> "$f"
@@ -217,19 +106,6 @@ jobs:
           echo '  LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef) { return 0; }' >> "$f"
           echo '}' >> "$f"
           echo '#endif' >> "$f"
-          echo '' >> "$f"
-          echo '#endif // AMICE_COMPAT_HELPERS' >> "$f"
-          echo '// ===== end helpers' >> "$f"
-
-          # 2) Replace all calls to createCFGSimplificationPass(...) with the helper
-          sed -E -i 's/::llvm::createCFGSimplificationPass\([^;]*\)/AMICE_makeCFGSimplify()/g' "$f"
-          sed -E -i 's/([^:])createCFGSimplificationPass\([^;]*\)/\1AMICE_makeCFGSimplify()/g' "$f"
-
-          # 3) Patch CodeExtractor constructor call for LLVM 12 by removing extra arguments
-          sed -i '/::llvm::CodeExtractor/s/, false, ".split"//' "$f"
-
-          echo "== Preview tail of ffi.cc =="
-          tail -n 120 "$f" || true
 
       - name: Build libamice.so (feature llvm12-0)
         shell: bash
