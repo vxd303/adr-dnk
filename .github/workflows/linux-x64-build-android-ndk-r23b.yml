@@ -138,17 +138,15 @@ jobs:
             echo '#endif'
           } >> "$f"
 
-      # ⬇️ LLVM<13: cung cấp symbol overload mới bằng 1 shim ở global scope,
-      # đặt label đúng mangled name; thân gọi factory cũ zero-arg ⇒ tránh ambiguous
+           # LLVM<13: Cấp symbol overload mới bằng shim; gọi trực tiếp symbol zero-arg cũ qua tên mangled.
       - name: Append LLVM12 shim for createCFGSimplificationPass overload into ffi.cc
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
           f="amice-llvm/cpp/ffi.cc"
-
-          # Nếu đã chèn trước đó thì bỏ qua (re-run không chèn trùng)
-          if grep -q 'amice_cfg_simplify_shim' "$f"; then
+          # Tránh chèn trùng khi re-run
+          if grep -q '_ZN4llvm27createCFGSimplificationPassEv' "$f" && grep -q 'amice_cfg_simplify_shim' "$f"; then
             echo "Shim already present, skipping"
             exit 0
           fi
@@ -161,11 +159,14 @@ jobs:
             echo '  struct SimplifyCFGOptions;'
             echo '  class Function;'
             echo '  class FunctionPass;'
-            echo '  // Bản factory cũ có trong LLVM 12:'
-            echo '  FunctionPass *createCFGSimplificationPass();'
             echo '}'
             echo ''
-            echo '// Định nghĩa shim ở global scope với symbol name của overload mới (LLVM>=13)'
+            echo '// Trỏ trực tiếp tới symbol zero-arg có sẵn trong LLVM12:'
+            echo 'extern "C" ::llvm::FunctionPass* amice_old_cfgsimplify()'
+            echo '  asm("_ZN4llvm27createCFGSimplificationPassEv");'
+            echo ''
+            echo '// Tạo symbol overload mới (LLVM>=13) bằng đúng mangled name,'
+            echo '// thân shim chỉ forward sang symbol zero-arg cũ để tránh thiếu symbol khi load plugin.'
             echo 'extern "C" ::llvm::FunctionPass* amice_cfg_simplify_shim('
             echo '    ::llvm::SimplifyCFGOptions,'
             echo '    std::function<bool(::llvm::Function const&)>)'
@@ -174,8 +175,7 @@ jobs:
             echo '::llvm::FunctionPass* amice_cfg_simplify_shim('
             echo '    ::llvm::SimplifyCFGOptions,'
             echo '    std::function<bool(::llvm::Function const&)>) {'
-            echo '  // Gọi đúng factory cũ zero-arg có trong LLVM 12'
-            echo '  return ::llvm::createCFGSimplificationPass();'
+            echo '  return amice_old_cfgsimplify();'
             echo '}'
             echo '#endif'
           } >> "$f"
