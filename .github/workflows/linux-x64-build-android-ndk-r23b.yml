@@ -14,8 +14,7 @@ jobs:
       AMICE_DIR: ${{ github.workspace }}/amice
       OUT_DIR: ${{ github.workspace }}/out
       CLANG_DIR: ${{ github.workspace }}/clang-r416183c1
-      # Unstripped clang r416183c1 (LLVM 12)
-      CLANG_UNSTRIPPED_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/c3260b409f13d92f8c9f4795420238694c529352/clang-r416183c1.tar.gz
+      CLANG_UNSTRIPPED_URL: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/c3260b409f13d92f8c9f4795420238694c529352/clang-r416183c1.tar.gz"
 
     steps:
       - name: Checkout (this repo)
@@ -56,7 +55,7 @@ jobs:
           tar -xzf /tmp/clang-r416183c1.tar.gz -C "$CLANG_DIR"
           "$CLANG_DIR/bin/clang++" --version || true
           ls -l "$CLANG_DIR/lib"  || true
-          ls -l "$CLANG_DIR/lib64"|| true
+          ls -l "$CLANG_DIR/lib64" || true
 
       - name: Normalize LLVM dylib name (handle libLLVM-12git.so)
         shell: bash
@@ -81,125 +80,119 @@ jobs:
             echo "PATH=$CLANG_DIR/bin:${PATH}"
             echo "CC=$CLANG_DIR/bin/clang"
             echo "CXX=$CLANG_DIR/bin/clang++"
-            echo "CXXFLAGS=-fno-rtti -fno-exceptions -std=c++17 -DLLVM_VERSION_MAJOR=12"
             echo "CARGO_TARGET_DIR=${{ env.AMICE_DIR }}/target-llvm12"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "RUSTFLAGS=-C linker=$CLANG_DIR/bin/clang -C link-arg=-fuse-ld=lld"
+            echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$CLANG_DIR/bin/clang"
           } >> "$GITHUB_ENV"
 
           if [ -x "$CLANG_DIR/bin/llvm-config" ]; then
             echo "LLVM_CONFIG_PATH=$CLANG_DIR/bin/llvm-config" >> "$GITHUB_ENV"
           fi
 
-      - name: Use clang + ld.lld as Rust linker
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo "RUSTFLAGS=-C linker=$CLANG_DIR/bin/clang -C link-arg=-fuse-ld=lld"
-            echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$CLANG_DIR/bin/clang"
-          } >> "$GITHUB_ENV"
-
-      - name: Reset ffi.cc to upstream
+      - name: Reset ffi.cc & ensure <cstddef> is included
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
-          git checkout -- amice-llvm/cpp/ffi.cc
-          echo "[OK] restored amice-llvm/cpp/ffi.cc"
-
-      - name: Inject <cstddef> at top of ffi.cc (fix std::size_t)
-        shell: bash
-        working-directory: ${{ env.AMICE_DIR }}
-        run: |
-          set -euo pipefail
+          git checkout -- amice-llvm/cpp/ffi.cc || true
           f="amice-llvm/cpp/ffi.cc"
-          if ! head -n 20 "$f" | grep -q '<cstddef>'; then
+          if ! grep -q '<cstddef>' "$f"; then
             sed -i '1i #include <cstddef>' "$f"
           fi
-          head -n 5 "$f"
 
-      - name: Patch for LLVM 12 (guard NoProfile enum)
+      - name: Patch build.rs to compile extra shim TU (cpp/llvm12_cfgshim.cc)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
-          f="amice-llvm/cpp/ffi.cc"
-          tmp="${f}.tmp"
-          awk '
-            /ENUM_CASE\(llvm::Attribute::NoProfile, NoProfile\)/ {
-              print "#if defined(LLVM_VERSION_MAJOR) && LLVM_VERSION_MAJOR >= 14";
-              print $0;
-              print "#endif";
-              next
-            }
-            { print }
-          ' "$f" > "$tmp"
-          mv "$tmp" "$f"
-          grep -n "NoProfile" "$f" || true
+          br="amice-llvm/build.rs"
+          if ! grep -q 'llvm12_cfgshim.cc' "$br"; then
+            awk '
+              /[.]file\("cpp\/ffi[.]cc"\)/ && !done {
+                print $0
+                print "        .file(\"cpp/llvm12_cfgshim.cc\")"
+                done=1
+                next
+              }
+              { print $0 }
+            ' "$br" > "${br}.tmp"
+            mv "${br}.tmp" "$br"
+          fi
+          grep -n 'llvm12_cfgshim.cc' "$br" || true
 
-      # ---- SHIM LLVM12: bổ sung cả 2 overload còn thiếu (SimplifyCFGOptions và legacy 6-tham-số) ----
-      - name: Inject LLVM12 CFGSimplify shim (2 missing overloads)
+      - name: Create cpp/llvm12_cfgshim.cc (No-Op CFG simplify + LLVMIsTypeAttribute stub)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
           mkdir -p amice-llvm/cpp
-          f="amice-llvm/cpp/llvm12_cfgshim.inc"
-          : > "$f"
-          echo '#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR < 13)' >> "$f"
-          echo '#include <functional>' >> "$f"
-          echo '#include "llvm/Transforms/Utils/SimplifyCFGOptions.h"' >> "$f"
-          echo 'namespace llvm { class Function; class FunctionPass; }' >> "$f"
-          echo 'namespace llvm {' >> "$f"
-          echo '  FunctionPass *createCFGSimplificationPass(unsigned, bool, bool, bool, bool,' >> "$f"
-          echo '      std::function<bool(const ::llvm::Function&)>);' >> "$f"
-          echo '}' >> "$f"
-          echo '' >> "$f"
-          # zero-arg có sẵn trong LLVM12 — dùng để forward:
-          echo 'extern "C" ::llvm::FunctionPass* amice_old_cfgsimplify()' >> "$f"
-          echo '  asm("_ZN4llvm27createCFGSimplificationPassEv");' >> "$f"
-          echo '' >> "$f"
-          # Overload mới (LLVM>=13): SimplifyCFGOptions, Predicate
-          echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_new(' >> "$f"
-          echo '    ::llvm::SimplifyCFGOptions,' >> "$f"
-          echo '    std::function<bool(::llvm::Function const&)>)' >> "$f"
-          echo '    asm("_ZN4llvm27createCFGSimplificationPassENS_18SimplifyCFGOptionsESt8functionIFbRKNS_8FunctionEEE");' >> "$f"
-          echo '' >> "$f"
-          echo '::llvm::FunctionPass* amice_cfgsimplify_new(' >> "$f"
-          echo '    ::llvm::SimplifyCFGOptions,' >> "$f"
-          echo '    std::function<bool(::llvm::Function const&)>) {' >> "$f"
-          echo '  return amice_old_cfgsimplify();' >> "$f"
-          echo '}' >> "$f"
-          echo '' >> "$f"
-          # Overload "legacy" mà loader của bạn đang đòi: (unsigned, bool, bool, bool, bool, function)
-          echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_legacy(' >> "$f"
-          echo '    unsigned, bool, bool, bool, bool,' >> "$f"
-          echo '    std::function<bool(::llvm::Function const&)>)' >> "$f"
-          echo '    asm("_ZN4llvm27createCFGSimplificationPassEjbbbbSt8functionIFbRKNS_8FunctionEEE");' >> "$f"
-          echo '' >> "$f"
-          echo '::llvm::FunctionPass* amice_cfgsimplify_legacy(' >> "$f"
-          echo '    unsigned, bool, bool, bool, bool,' >> "$f"
-          echo '    std::function<bool(::llvm::Function const&)>) {' >> "$f"
-          echo '  return amice_old_cfgsimplify();' >> "$f"
-          echo '}' >> "$f"
-          echo '' >> "$f"
-          # LLVM<13 thiếu LLVMIsTypeAttribute trong C-API
-          echo 'extern "C" {' >> "$f"
-          echo '  typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;' >> "$f"
-          echo '  typedef int LLVMBool;' >> "$f"
-          echo '  LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef) { return 0; }' >> "$f"
-          echo '}' >> "$f"
-          echo '#endif /* LLVM<13 */' >> "$f"
-          ffi="amice-llvm/cpp/ffi.cc"
-          if ! grep -q '^#include "llvm12_cfgshim.inc"' "$ffi"; then
-            sed -i '1i #include "llvm12_cfgshim.inc"' "$ffi"
-          fi
-          tail -n 80 "$ffi" || true
-          echo "---- shim file ----"
-          cat "$f" | sed -n '1,140p'
+          SHIM_FILE="amice-llvm/cpp/llvm12_cfgshim.cc"
+          echo '// This translation unit provides missing createCFGSimplificationPass symbols for LLVM 12-based NDKs' > "$SHIM_FILE"
+          echo '#include <functional>' >> "$SHIM_FILE"
+          echo '#include "llvm/IR/Function.h"' >> "$SHIM_FILE"
+          echo '#include "llvm/Pass.h"' >> "$SHIM_FILE"
+          echo '' >> "$SHIM_FILE"
+          echo 'namespace llvm { struct SimplifyCFGOptions; }' >> "$SHIM_FILE"
+          echo '' >> "$SHIM_FILE"
+          echo '#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR < 13)' >> "$SHIM_FILE"
+          echo '' >> "$SHIM_FILE"
+          echo 'namespace {' >> "$SHIM_FILE"
+          echo '  struct NoOpCFGSimplifyPass : public ::llvm::FunctionPass {' >> "$SHIM_FILE"
+          echo '    static char ID;' >> "$SHIM_FILE"
+          echo '    NoOpCFGSimplifyPass() : ::llvm::FunctionPass(ID) {}' >> "$SHIM_FILE"
+          echo '    bool runOnFunction(::llvm::Function&) override { return false; }' >> "$SHIM_FILE"
+          echo '  };' >> "$SHIM_FILE"
+          echo '  char NoOpCFGSimplifyPass::ID = 0;' >> "$SHIM_FILE"
+          echo '}' >> "$SHIM_FILE"
+          echo '' >> "$SHIM_FILE"
+          echo '// 1) zero-arg variant' >> "$SHIM_FILE"
+          echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_zero()' >> "$SHIM_FILE"
+          echo '  asm("_ZN4llvm27createCFGSimplificationPassEv");' >> "$SHIM_FILE"
+          echo '::llvm::FunctionPass* amice_cfgsimplify_zero() {' >> "$SHIM_FILE"
+          echo '  return new NoOpCFGSimplifyPass();' >> "$SHIM_FILE"
+          echo '}' >> "$SHIM_FILE"
+          echo '' >> "$SHIM_FILE"
+          echo '// 2) (SimplifyCFGOptions, Predicate) variant in newer LLVM' >> "$SHIM_FILE"
+          echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_new(' >> "$SHIM_FILE"
+          echo '  ::llvm::SimplifyCFGOptions,' >> "$SHIM_FILE"
+          echo '  std::function<bool(::llvm::Function const&)>)' >> "$SHIM_FILE"
+          echo '  asm("_ZN4llvm27createCFGSimplificationPassENS_18SimplifyCFGOptionsESt8functionIFbRKNS_8FunctionEEE");' >> "$SHIM_FILE"
+          echo '::llvm::FunctionPass* amice_cfgsimplify_new(' >> "$SHIM_FILE"
+          echo '  ::llvm::SimplifyCFGOptions,' >> "$SHIM_FILE"
+          echo '  std::function<bool(::llvm::Function const&)>)' >> "$SHIM_FILE"
+          echo '{' >> "$SHIM_FILE"
+          echo '  return new NoOpCFGSimplifyPass();' >> "$SHIM_FILE"
+          echo '}' >> "$SHIM_FILE"
+          echo '' >> "$SHIM_FILE"
+          echo '// 3) legacy 6-params variant used around LLVM 11/12 in some headers' >> "$SHIM_FILE"
+          echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_legacy(' >> "$SHIM_FILE"
+          echo '  unsigned, bool, bool, bool, bool,' >> "$SHIM_FILE"
+          echo '  std::function<bool(::llvm::Function const&)>)' >> "$SHIM_FILE"
+          echo '  asm("_ZN4llvm27createCFGSimplificationPassEjbbbbSt8functionIFbRKNS_8FunctionEEE");' >> "$SHIM_FILE"
+          echo '::llvm::FunctionPass* amice_cfgsimplify_legacy(' >> "$SHIM_FILE"
+          echo '  unsigned, bool, bool, bool, bool,' >> "$SHIM_FILE"
+          echo '  std::function<bool(::llvm::Function const&)>)' >> "$SHIM_FILE"
+          echo '{' >> "$SHIM_FILE"
+          echo '  return new NoOpCFGSimplifyPass();' >> "$SHIM_FILE"
+          echo '}' >> "$SHIM_FILE"
+          echo '' >> "$SHIM_FILE"
+          echo '// Stub missing C-API for LLVM<13' >> "$SHIM_FILE"
+          echo 'extern "C" {' >> "$SHIM_FILE"
+          echo '  typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;' >> "$SHIM_FILE"
+          echo '  typedef int LLVMBool;' >> "$SHIM_FILE"
+          echo '  LLVMBool LLVMIsTypeAttribute(LLVMAttributeRef) { return 0; }' >> "$SHIM_FILE"
+          echo '}' >> "$SHIM_FILE"
+          echo '' >> "$SHIM_FILE"
+          echo '#endif /* LLVM_VERSION_MAJOR < 13 */' >> "$SHIM_FILE"
 
       - name: Build libamice.so (feature llvm12-0)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
+        env:
+          CXXFLAGS: -fno-rtti -fno-exceptions -std=c++17 -DLLVM_VERSION_MAJOR=12
         run: |
           set -euo pipefail
           cargo clean
@@ -220,3 +213,4 @@ jobs:
           name: libamice-ndk-r23b-clang-r416183c1
           path: ${{ env.OUT_DIR }}/libamice.so
           if-no-files-found: error
+
