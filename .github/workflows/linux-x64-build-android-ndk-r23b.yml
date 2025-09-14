@@ -117,7 +117,7 @@ jobs:
           echo '    llvm::BlockFrequencyInfo *BFI, llvm::BranchProbabilityInfo *BPI,' >> "$SHIM_FILE"
           echo '    llvm::AssumptionCache *AC, bool AllowVarArgs, bool Suffix,' >> "$SHIM_FILE"
           echo '    std::string /*SuffixName*/)' >> "$SHIM_FILE"
-          echo '    asm("_ZN4llvm13CodeExtractorC1ENS_8ArrayRefIPNS_10BasicBlockEEEPNS_13DominatorTreeEbPNS_18BlockFrequencyInfoEPNS_21BranchProbabilityInfoEPNS_15AssumptionCacheEbbNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")' >> "$SHIM_FILE"
+          echo '    asm("_ZN4llvm13CodeExtractorC1ENS_8ArrayRefIPNS_10BasicBlockEEEPNS_13DominatorTreeEbPNS_18BlockFrequencyInfoEPNS_21BranchProbabilityInfoEPNS_15AssumptionCacheEbbNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE");' >> "$SHIM_FILE"
           echo '    : CodeExtractor(Blocks, DT, AggregateArgs, BFI, BPI, AC, AllowVarArgs, Suffix)' >> "$SHIM_FILE"
           echo '{' >> "$SHIM_FILE"
           echo '    // The body is empty as the real work is done by the chained constructor.' >> "$SHIM_FILE"
@@ -132,17 +132,8 @@ jobs:
         run: |
           set -euo pipefail
           BUILD_RS="amice-llvm/build.rs"
-          # Use awk for a more robust insertion right after ffi.cc
-          awk '
-            /\.file\("cpp\/ffi\.cc"\)/ {
-              print
-              # Make sure indentation matches the original file
-              print "        .file(\"cpp/llvm12_shims.cc\")"
-              next
-            }
-            { print }
-          ' "$BUILD_RS" > "${BUILD_RS}.tmp"
-          mv "${BUILD_RS}.tmp" "$BUILD_RS"
+          # Safely transform .file("...") into .files(&["...", "..."]) to add the shim
+          sed -i 's/\.file("cpp\/ffi\.cc")/.files(\&\["cpp\/ffi.cc", "cpp\/llvm12_shims.cc"\])/' "$BUILD_RS"
           echo "[OK] Patched ${BUILD_RS} to include shim file."
           grep -C 2 "shims.cc" "$BUILD_RS"
 
@@ -169,4 +160,3 @@ jobs:
           name: libamice-ndk-r23b-clang-r416183c1
           path: ${{ env.OUT_DIR }}/libamice.so
           if-no-files-found: error
-
