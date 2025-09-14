@@ -98,6 +98,30 @@ jobs:
           git checkout -- amice-llvm/cpp/ffi.cc
           echo "[OK] restored amice-llvm/cpp/ffi.cc"
 
+      - name: Patch ffi.cc (drop LLVMIsTypeAttribute on LLVM<13)
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          f="amice-llvm/cpp/ffi.cc"
+          # Chèn macro ngay đầu file để mọi chỗ dùng đều được thay thế
+          awk 'BEGIN{
+            print "#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR < 13)"
+            print "  // NDK r23b (LLVM 12) không có LLVMIsTypeAttribute trong C-API."
+            print "  // Trên LLVM<13, coi như luôn = false để khỏi tạo reference tới symbol."
+            print "  #ifndef LLVM_ATTRIBUTE_REF_FWD"
+            print "    typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;"
+            print "    typedef int LLVMBool;"
+            print "  #define LLVM_ATTRIBUTE_REF_FWD 1"
+            print "  #endif"
+            print "  #define LLVMIsTypeAttribute(_A_) 0"
+            print "#endif"
+          } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+
+          echo "Preview header lines:"
+          head -n 30 "$f" || true
+
+
       - name: Patch ffi.cc (guard Attribute::NoProfile for LLVM<14)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
