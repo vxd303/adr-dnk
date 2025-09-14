@@ -106,14 +106,12 @@ jobs:
           git checkout -- amice-llvm/cpp/ffi.cc
           echo "[OK] restored amice-llvm/cpp/ffi.cc"
 
-      # >>> NEW: ép include <cstddef> để std::size_t luôn có mặt (fix lỗi bạn gặp)
-      - name: Inject <cstddef> at the very top of ffi.cc
+      - name: Inject <cstddef> at top of ffi.cc (fix std::size_t)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
           f="amice-llvm/cpp/ffi.cc"
-          # chỉ chèn nếu chưa có
           if ! head -n 20 "$f" | grep -q '<cstddef>'; then
             sed -i '1i #include <cstddef>' "$f"
           fi
@@ -138,8 +136,8 @@ jobs:
           mv "$tmp" "$f"
           grep -n "NoProfile" "$f" || true
 
-      # ==== SHIM cho LLVM12: chỉ bổ sung overload mới, ở GLOBAL SCOPE ====
-      - name: Inject LLVM12 CFGSimplify shim (minimal, global-scope)
+      # ---- SHIM LLVM12: bổ sung cả 2 overload còn thiếu (SimplifyCFGOptions và legacy 6-tham-số) ----
+      - name: Inject LLVM12 CFGSimplify shim (2 missing overloads)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
@@ -153,9 +151,14 @@ jobs:
           echo 'namespace llvm { class Function; class FunctionPass; }' >> "$f"
           echo 'namespace llvm {' >> "$f"
           echo '  FunctionPass *createCFGSimplificationPass(unsigned, bool, bool, bool, bool,' >> "$f"
-          echo '      std::function<bool(const ::llvm::Function &)>);' >> "$f"
+          echo '      std::function<bool(const ::llvm::Function&)>);' >> "$f"
           echo '}' >> "$f"
           echo '' >> "$f"
+          # zero-arg có sẵn trong LLVM12 — dùng để forward:
+          echo 'extern "C" ::llvm::FunctionPass* amice_old_cfgsimplify()' >> "$f"
+          echo '  asm("_ZN4llvm27createCFGSimplificationPassEv");' >> "$f"
+          echo '' >> "$f"
+          # Overload mới (LLVM>=13): SimplifyCFGOptions, Predicate
           echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_new(' >> "$f"
           echo '    ::llvm::SimplifyCFGOptions,' >> "$f"
           echo '    std::function<bool(::llvm::Function const&)>)' >> "$f"
@@ -164,9 +167,22 @@ jobs:
           echo '::llvm::FunctionPass* amice_cfgsimplify_new(' >> "$f"
           echo '    ::llvm::SimplifyCFGOptions,' >> "$f"
           echo '    std::function<bool(::llvm::Function const&)>) {' >> "$f"
-          echo '  return ::llvm::createCFGSimplificationPass(1, false, false, true, false, nullptr);' >> "$f"
+          echo '  return amice_old_cfgsimplify();' >> "$f"
           echo '}' >> "$f"
           echo '' >> "$f"
+          # Overload "legacy" mà loader của bạn đang đòi: (unsigned, bool, bool, bool, bool, function)
+          echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_legacy(' >> "$f"
+          echo '    unsigned, bool, bool, bool, bool,' >> "$f"
+          echo '    std::function<bool(::llvm::Function const&)>)' >> "$f"
+          echo '    asm("_ZN4llvm27createCFGSimplificationPassEjbbbbSt8functionIFbRKNS_8FunctionEEE");' >> "$f"
+          echo '' >> "$f"
+          echo '::llvm::FunctionPass* amice_cfgsimplify_legacy(' >> "$f"
+          echo '    unsigned, bool, bool, bool, bool,' >> "$f"
+          echo '    std::function<bool(::llvm::Function const&)>) {' >> "$f"
+          echo '  return amice_old_cfgsimplify();' >> "$f"
+          echo '}' >> "$f"
+          echo '' >> "$f"
+          # LLVM<13 thiếu LLVMIsTypeAttribute trong C-API
           echo 'extern "C" {' >> "$f"
           echo '  typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;' >> "$f"
           echo '  typedef int LLVMBool;' >> "$f"
@@ -177,7 +193,9 @@ jobs:
           if ! grep -q '^#include "llvm12_cfgshim.inc"' "$ffi"; then
             sed -i '1i #include "llvm12_cfgshim.inc"' "$ffi"
           fi
-          tail -n 60 "$ffi" || true
+          tail -n 80 "$ffi" || true
+          echo "---- shim file ----"
+          cat "$f" | sed -n '1,140p'
 
       - name: Build libamice.so (feature llvm12-0)
         shell: bash
