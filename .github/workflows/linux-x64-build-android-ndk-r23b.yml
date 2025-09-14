@@ -84,8 +84,7 @@ jobs:
             echo "RUSTFLAGS=-C linker=$CLANG_DIR/bin/clang -C link-arg=-fuse-ld=lld"
             echo "CARGO_TARGET_DIR=${{ env.AMICE_DIR }}/target-llvm12"
             echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$CLANG_DIR/bin/clang"
-            # Force dynamic linking by specifying the shared library name and forcing the mode
-            echo "LLVM_SYS_120_SHARED_LIB_NAME=$BASENAME"
+            # Force dynamic linking to prevent CommandLine option conflicts
             echo "LLVM_SYS_120_FORCE_DYNAMIC=1"
           } >> "$GITHUB_ENV"
 
@@ -202,6 +201,16 @@ jobs:
           cargo build --release --no-default-features --features llvm12-0
           mkdir -p "$OUT_DIR"
           cp -v target-llvm12/release/libamice.so "$OUT_DIR/"
+
+      - name: Verify Dynamic Linking
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "--- Verifying libamice.so dependencies ---"
+          ldd "$OUT_DIR/libamice.so"
+          # Fail the build if it's NOT dynamically linked to libLLVM, which would cause runtime errors.
+          ldd "$OUT_DIR/libamice.so" | grep -q 'libLLVM' || (echo "ERROR: libamice.so is NOT dynamically linked to libLLVM!"; exit 1)
+          echo "[OK] libamice.so is correctly linked dynamically to libLLVM."
 
       - name: Smoke test:load plugin with this clang
         shell: bash
