@@ -90,6 +90,26 @@ jobs:
             echo "LLVM_CONFIG_PATH=$CLANG_DIR/bin/llvm-config" >> "$GITHUB_ENV"
           fi
 
+      - name: Patch ffi.cc (guard Attribute::NoProfile for LLVM<14)
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          f="amice-llvm/cpp/ffi.cc"
+          if grep -q 'ENUM_CASE(llvm::Attribute::NoProfile, NoProfile)' "$f"; then
+            awk '
+              /ENUM_CASE\(llvm::Attribute::NoProfile, NoProfile\)/ {
+                print "#if defined(LLVM_VERSION_MAJOR) && (LLVM_VERSION_MAJOR >= 14)";
+                print $0;
+                print "#endif";
+                next
+              }
+              { print }
+            ' "$f" > "$f.tmp"
+            mv "$f.tmp" "$f"
+            echo "[OK] Patched ffi.cc to guard Attribute::NoProfile."
+          fi
+
       - name: Create C++ shim file for LLVM 12 compatibility
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
@@ -160,3 +180,4 @@ jobs:
           name: libamice-ndk-r23b-clang-r416183c1
           path: ${{ env.OUT_DIR }}/libamice.so
           if-no-files-found: error
+
