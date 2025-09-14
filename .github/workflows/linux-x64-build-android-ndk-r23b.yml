@@ -119,6 +119,76 @@ jobs:
             grep -n "NoProfile" "$f" || true
           fi
 
+      - name: Patch (LLVM12 CFGSimplify shim via echo; provide both symbols)
+        shell: bash
+        working-directory: ${{ env.AMICE_DIR }}
+        run: |
+          set -euo pipefail
+          f="amice-llvm/cpp/ffi.cc"
+
+          # 1) Dọn mọi khai báo/gọi overload rỗng (nếu có) để tránh ambiguous lúc compile
+          sed -i '/FunctionPass[[:space:]]*\*[[:space:]]*createCFGSimplificationPass[[:space:]]*( *);/d' "$f" || true
+          sed -i 's/::llvm::createCFGSimplificationPass()[[:space:]]*;/amice_cfgshim_call();/g' "$f" || true
+
+          # 2) Chèn shim chỉ bằng echo (tránh lỗi cú pháp YAML)
+          echo '#if defined(LLVM_VERSION_MAJOR)' >> "$f"
+          echo '#include <functional>' >> "$f"
+          echo 'namespace llvm { class Function; class FunctionPass; struct SimplifyCFGOptions; }' >> "$f"
+          echo '' >> "$f"
+          echo '// Helper gọi đúng factory tồn tại theo phiên bản LLVM' >> "$f"
+          echo 'static ::llvm::FunctionPass *amice_cfgshim_call() {' >> "$f"
+          echo '# if LLVM_VERSION_MAJOR >= 13' >> "$f"
+          echo '  // LLVM >= 13: có SimplifyCFGOptions' >> "$f"
+          echo '  #include "llvm/Transforms/Scalar.h"' >> "$f"
+          echo '  #include "llvm/Transforms/Utils/SimplifyCFGOptions.h"' >> "$f"
+          echo '  ::llvm::SimplifyCFGOptions Opts = ::llvm::SimplifyCFGOptions();' >> "$f"
+          echo '  return ::llvm::createCFGSimplificationPass(Opts, nullptr);' >> "$f"
+          echo '# else' >> "$f"
+          echo '  // LLVM 12: chỉ có bản 6 tham số; forward-declare đúng chữ ký rồi gọi' >> "$f"
+          echo '  namespace llvm {' >> "$f"
+          echo '    ::llvm::FunctionPass *createCFGSimplificationPass(' >> "$f"
+          echo '      unsigned Threshold,' >> "$f"
+          echo '      bool ForwardSwitchCond,' >> "$f"
+          echo '      bool ConvertSwitch,' >> "$f"
+          echo '      bool KeepLoops,' >> "$f"
+          echo '      bool SinkCommon,' >> "$f"
+          echo '      std::function<bool(const ::llvm::Function &)> Ftor);' >> "$f"
+          echo '  }' >> "$f"
+          echo '  using OldTy = ::llvm::FunctionPass *(*)(unsigned,bool,bool,bool,bool,std::function<bool(const ::llvm::Function&)>);' >> "$f"
+          echo '  OldTy oldFn = (OldTy)&::llvm::createCFGSimplificationPass;' >> "$f"
+          echo '  return oldFn(/*Threshold*/1, /*ForwardSwitchCond*/false,' >> "$f"
+          echo '               /*ConvertSwitch*/false, /*KeepLoops*/true,' >> "$f"
+          echo '               /*SinkCommon*/false, /*Ftor*/nullptr);' >> "$f"
+          echo '# endif' >> "$f"
+          echo '}' >> "$f"
+          echo '' >> "$f"
+          echo '// Cấp symbol zero-arg (LLVM>=13 hay code khác có thể tham chiếu) — forward về helper' >> "$f"
+          echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_zero()' >> "$f"
+          echo '  asm("_ZN4llvm27createCFGSimplificationPassEv");' >> "$f"
+          echo '::llvm::FunctionPass* amice_cfgsimplify_zero() { return amice_cfgshim_call(); }' >> "$f"
+          echo '' >> "$f"
+          echo '// Cấp symbol overload mới (LLVM>=13) — cũng forward về helper' >> "$f"
+          echo 'extern "C" ::llvm::FunctionPass* amice_cfgsimplify_new(' >> "$f"
+          echo '    ::llvm::SimplifyCFGOptions,' >> "$f"
+          echo '    std::function<bool(::llvm::Function const&)>)' >> "$f"
+          echo '  asm("_ZN4llvm27createCFGSimplificationPassENS_18SimplifyCFGOptionsESt8functionIFbRKNS_8FunctionEEE");' >> "$f"
+          echo '::llvm::FunctionPass* amice_cfgsimplify_new(' >> "$f"
+          echo '    ::llvm::SimplifyCFGOptions,' >> "$f"
+          echo '    std::function<bool(::llvm::Function const&)>) {' >> "$f"
+          echo '  return amice_cfgshim_call();' >> "$f"
+          echo '}' >> "$f"
+          echo '#endif // defined(LLVM_VERSION_MAJOR)' >> "$f"
+
+          echo "==== Tail ffi.cc ===="
+          tail -n 120 "$f" || true
+
+      # (Tuỳ chọn) Kiểm tra plugin không còn reference tới symbol zero-arg ngoài chính nó
+      - name: Sanity check (nm)
+        shell: bash
+        run: |
+          set -euo pipefail
+          nm -D ${{ env.OUT_DIR }}/libamice.so | c++filt | grep -n 'createCFGSimplificationPass' || true
+
       # STUB LLVMIsTypeAttribute cho LLVM<13 (dùng echo để tránh lỗi YAML)
       - name: Patch for LLVM 12 (stub LLVMIsTypeAttribute for LLVM<13)
         shell: bash
