@@ -117,14 +117,14 @@ jobs:
             mv "$f.tmp" "$f"
           fi
 
-      - name: Patch ffi.cc (use CFGSimplify old API and stub newer signatures for LLVM<13)
+      - name: Patch ffi.cc for LLVM 12 compatibility
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
         run: |
           set -euo pipefail
           f="amice-llvm/cpp/ffi.cc"
 
-          # 1) Add helper code to the end of the file
+          # 1) Add compatibility helper code to the end of the file
           echo '' >> "$f"
           echo '// ===== AMICE compatibility helpers (portable across LLVM 12+)' >> "$f"
           echo '#if !defined(AMICE_COMPAT_HELPERS)' >> "$f"
@@ -225,6 +225,10 @@ jobs:
           sed -E -i 's/::llvm::createCFGSimplificationPass\([^;]*\)/AMICE_makeCFGSimplify()/g' "$f"
           sed -E -i 's/([^:])createCFGSimplificationPass\([^;]*\)/\1AMICE_makeCFGSimplify()/g' "$f"
 
+          # 3) Patch CodeExtractor constructor call for LLVM 12 by removing extra arguments
+          sed -i 's/::llvm::CodeExtractor(Blocks, &DT, false, &BFI, &BPI, &AC, true, false, ".split")/::llvm::CodeExtractor(Blocks, \&DT, false, \&BFI, \&BPI, \&AC, true)/g' "$f"
+
+
           echo "== Preview tail of ffi.cc =="
           tail -n 120 "$f" || true
 
@@ -251,3 +255,4 @@ jobs:
           name: libamice-ndk-r23b-clang-r416183c1
           path: ${{ env.OUT_DIR }}/libamice.so
           if-no-files-found: error
+
