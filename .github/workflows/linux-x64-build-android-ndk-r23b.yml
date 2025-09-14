@@ -194,7 +194,7 @@ jobs:
           echo '  FunctionPass* createCFGSimplificationPass(' >> "$f"
           echo '      unsigned, bool, bool, bool, bool, std::function<bool(const ::llvm::Function&)>);' >> "$f"
           echo '  Pass* createPrintModulePass(raw_ostream& OS, const std::string& Banner = "");' >> "$f"
-          echo '  Pass* createPrintFunctionPass(raw_ostream& OS, const std::string& Banner = "");' >> "$f"
+          echo '  FunctionPass* createPrintFunctionPass(raw_ostream& OS, const std::string& Banner = "");' >> "$f"
           echo '}' >> "$f"
           echo '#endif' >> "$f"
           echo '' >> "$f"
