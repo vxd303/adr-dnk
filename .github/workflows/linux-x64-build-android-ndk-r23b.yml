@@ -192,6 +192,22 @@ jobs:
           echo "[OK] Patched ${BUILD_RS} to include shim file."
           grep -C 2 "shims.cc" "$BUILD_RS"
 
+      - name: Temporarily Hide Static LLVM Libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIBDIR_PATH=$(find "$CLANG_DIR" -type d \( -name "lib" -o -name "lib64" \) | head -n1)
+          echo "Found LLVM lib directory at: $LIBDIR_PATH"
+          if [ -d "$LIBDIR_PATH" ]; then
+            mkdir -p "$LIBDIR_PATH/static_libs_tmp"
+            # Find and move all .a files to prevent static linking
+            find "$LIBDIR_PATH" -maxdepth 1 -name "*.a" -exec mv {} "$LIBDIR_PATH/static_libs_tmp/" \;
+            echo "Temporarily moved static libraries to static_libs_tmp/ to force dynamic linking."
+            ls -l "$LIBDIR_PATH/static_libs_tmp/"
+          else
+            echo "Warning: LLVM lib directory not found, skipping hiding static libs."
+          fi
+
       - name: Build libamice.so (feature llvm12-0)
         shell: bash
         working-directory: ${{ env.AMICE_DIR }}
