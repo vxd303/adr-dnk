@@ -226,7 +226,7 @@ jobs:
           sed -E -i 's/([^:])createCFGSimplificationPass\([^;]*\)/\1AMICE_makeCFGSimplify()/g' "$f"
 
           # 3) Patch CodeExtractor constructor call for LLVM 12 by removing extra arguments
-          sed -i 's/::llvm::CodeExtractor(Blocks, &DT, false, &BFI, &BPI, &AC, true, false, ".split")/::llvm::CodeExtractor(Blocks, \&DT, false, \&BFI, \&BPI, \&AC, true)/g' "$f"
+          sed -E -i 's/(::llvm::CodeExtractor\(.*, &AC, true\)), false, "\.split"/\1/g' "$f"
 
 
           echo "== Preview tail of ffi.cc =="
